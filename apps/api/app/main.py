@@ -54,8 +54,13 @@ app.add_middleware(
 )
 
 DATA_CUTOFF = settings.data_cutoff or date.today().isoformat()
-SESSIONS: dict[str, Session] = {
-    "session-ror1": Session(
+SESSIONS: dict[str, Session] = {}
+SESSION_MESSAGES: dict[str, list[SessionMessage]] = {}
+# Keep the original ROR1 fixture available only for offline API tests.  A
+# database-backed workspace must start empty and show only sessions the user
+# actually created and searched.
+if settings.api_mode != "database":
+    SESSIONS["session-ror1"] = Session(
         id="session-ror1",
         title="ROR1 · ADC 立项判断",
         question="ROR1 在三阴性乳腺癌中是否适合开发 ADC？",
@@ -67,9 +72,7 @@ SESSIONS: dict[str, Session] = {
         pinned=True,
         is_mock=False,
     )
-}
-SESSION_MESSAGES: dict[str, list[SessionMessage]] = {
-    "session-ror1": [
+    SESSION_MESSAGES["session-ror1"] = [
         SessionMessage(
             id="message-ror1-seed",
             session_id="session-ror1",
@@ -79,7 +82,6 @@ SESSION_MESSAGES: dict[str, list[SessionMessage]] = {
             is_mock=False,
         )
     ]
-}
 TARGET_CARDS: dict[str, dict[str, Any]] = {}
 RESEARCH_BUNDLES: dict[str, ResearchBundle] = {}
 
