@@ -162,6 +162,7 @@ export interface GroundedAnswer {
   conflicts: string[];
   nextActions: string[];
   dataCutoff: string;
+  provider?: string;
 }
 
 export interface DecisionOption {

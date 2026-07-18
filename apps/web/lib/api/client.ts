@@ -2,7 +2,7 @@ import type { DecisionMemo, GroundedAnswer, ResearchSession, ScoreSnapshot, Targ
 
 export interface CreateSessionInput { question: string }
 export interface ResearchInput { question: string; officialOnly?: boolean }
-export interface AskInput { question: string; officialOnly?: boolean }
+export interface AskInput { question: string; officialOnly?: boolean; reasoning?: boolean }
 export interface ResearchJob { jobId: string; status: "QUEUED" | "RUNNING" | "READY"; eventsUrl: string }
 export interface ResearchSessionDetail extends ResearchSession { question: string; targetCard?: TargetCard; score?: ScoreSnapshot; decisionMemo?: DecisionMemo }
 

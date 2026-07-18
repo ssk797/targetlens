@@ -10,7 +10,9 @@ from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
 from app.core.logging import configure_logging
-from app.schemas import HealthResponse, ResearchJob, Session, SessionCreate, now_utc
+from app.schemas import DatabaseStatus, HealthResponse, MessageCreate, ResearchJob, ResearchPreviewRequest, Session, SessionCreate, now_utc
+from app.services.ai.deepseek import DeepSeekClient, DeepSeekProviderError
+from app.services.research.connectors import ResearchAggregator, ResearchBundle
 from app.services.scoring.engine import calculate_score
 from app.services.scoring.schemas import (
     EvidenceDimensions,
@@ -44,9 +46,43 @@ SESSIONS: dict[str, Session] = {
 }
 
 
+async def database_status() -> DatabaseStatus:
+    if settings.api_mode != "database":
+        return "not_configured"
+    try:
+        from sqlalchemy import text
+
+        from app.db.session import engine
+
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        return "connected"
+    except Exception:
+        return "unavailable"
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    return HealthResponse(status="ok", mode=settings.api_mode, timestamp=now_utc())
+    return HealthResponse(status="ok", mode=settings.api_mode, timestamp=now_utc(), database=await database_status())
+
+
+@app.get("/api/v1/ai/status")
+async def ai_status() -> dict[str, object]:
+    configured = bool(settings.deepseek_api_key and settings.deepseek_api_key.get_secret_value().strip())
+    return {
+        "provider": "deepseek",
+        "enabled": settings.ai_enabled,
+        "configured": configured,
+        "base_url": settings.deepseek_base_url,
+        "models": {"fast": settings.deepseek_model_fast, "reasoning": settings.deepseek_model_reasoning},
+    }
+
+
+@app.post("/api/v1/research/preview", response_model=ResearchBundle)
+async def research_preview(payload: ResearchPreviewRequest) -> ResearchBundle:
+    """Fetch a normalized, traceable preview from public research connectors."""
+
+    return await ResearchAggregator().search(payload.target, payload.disease, payload.modality)
 
 
 @app.get("/api/v1/sessions", response_model=list[Session])
@@ -171,10 +207,21 @@ async def calculate_session_scores(session_id: str, payload: ScoreRequest) -> Sc
 
 
 @app.post("/api/v1/sessions/{session_id}/messages")
-async def ask(session_id: str, payload: dict[str, str]) -> dict[str, object]:
+async def ask(session_id: str, payload: MessageCreate) -> dict[str, object]:
     if session_id not in SESSIONS:
         raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
-    question = payload.get("question", "").strip()
-    if not question:
-        raise HTTPException(status_code=422, detail="QUESTION_REQUIRED")
+    question = payload.question.strip()
+    if settings.ai_enabled and settings.deepseek_api_key:
+        try:
+            client = DeepSeekClient.from_settings(settings)
+            answer = await client.complete(
+                [
+                    {"role": "system", "content": "你是 TargetLens 研究助手。只把有证据支持的内容说成事实；无法确认时明确标注未知，不要编造文献、临床试验或监管结论。用简洁的中文回答。"},
+                    {"role": "user", "content": question},
+                ],
+                reasoning=payload.reasoning,
+            )
+            return {"id": f"answer-{uuid4().hex[:8]}", "status": "READY", "summary": answer, "question": question, "data_cutoff": DATA_CUTOFF, "is_mock": False, "provider": "deepseek"}
+        except DeepSeekProviderError:
+            return {"id": f"answer-{uuid4().hex[:8]}", "status": "DEGRADED", "summary": "DeepSeek 暂时不可用，已回退到演示回答；请稍后重试。", "question": question, "data_cutoff": DATA_CUTOFF, "is_mock": True, "provider": "deepseek", "provider_status": "DEGRADED"}
     return {"id": f"answer-{uuid4().hex[:8]}", "status": "PARTIAL", "summary": "Mock grounded answer：请结合证据抽屉继续核验。", "question": question, "data_cutoff": DATA_CUTOFF, "is_mock": True}

@@ -14,6 +14,7 @@ import { ResearchProgress } from "@/components/workspace/research-progress";
 import { TargetCard } from "@/components/workspace/target-card";
 import { DecisionMemo } from "@/components/workspace/decision-memo";
 import { ScorePanel } from "@/components/workspace/score-panel";
+import { httpClient } from "@/lib/api/http-client";
 
 export type ResearchStage = "RESOLVING_ENTITY" | "FETCHING_STRUCTURED_DATA" | "RETRIEVING_LITERATURE" | "BUILDING_GRAPH" | "GENERATING_CARD" | "READY";
 
@@ -32,6 +33,8 @@ export function WorkspaceShell() {
   const [memoVisible, setMemoVisible] = useState(true);
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [answerIndex, setAnswerIndex] = useState(0);
+  const [isAsking, setIsAsking] = useState(false);
+  const [composerSeed, setComposerSeed] = useState("");
 
   useEffect(() => {
     if (!isResearching) return;
@@ -54,16 +57,26 @@ export function WorkspaceShell() {
   const startResearch = (question: string) => {
     setActiveId("session-ror1");
     setHasResearch(true);
+    setComposerSeed("");
     setConversation([{ kind: "user", text: question }]);
     setMemoVisible(false);
     setProgressIndex(0);
     setIsResearching(true);
   };
 
-  const handleAsk = (question: string) => {
-    const answer = mockAnswers[answerIndex % mockAnswers.length];
-    setConversation((current) => [...current, { kind: "user", text: question }, { kind: "answer", answer }]);
-    setAnswerIndex((current) => current + 1);
+  const handleAsk = async (question: string) => {
+    setConversation((current) => [...current, { kind: "user", text: question }]);
+    setIsAsking(true);
+    try {
+      const answer = await httpClient.ask(activeId ?? "session-ror1", { question });
+      setConversation((current) => [...current, { kind: "answer", answer }]);
+    } catch {
+      const answer = mockAnswers[answerIndex % mockAnswers.length];
+      setConversation((current) => [...current, { kind: "answer", answer }]);
+      setAnswerIndex((current) => current + 1);
+    } finally {
+      setIsAsking(false);
+    }
   };
 
   const handleNew = () => {
@@ -72,6 +85,8 @@ export function WorkspaceShell() {
     setConversation([]);
     setMemoVisible(false);
     setIsResearching(false);
+    setIsAsking(false);
+    setComposerSeed("");
     setProgressIndex(0);
     setDrawerEvidence(null);
   };
@@ -95,12 +110,12 @@ export function WorkspaceShell() {
       <HistorySidebar sessions={mockSessions} activeId={activeId} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} onSelect={handleSelect} onNew={handleNew} onTutorial={() => router.push("/tutorial")} />
       <main className="main-viewport">
         <header className="session-topbar">
-          <div className="breadcrumb"><button className="mobile-menu icon-button" aria-label="打开导航"><Menu size={18} /></button><span>靶点研读</span><span className="breadcrumb-separator">/</span><strong>{currentSession?.title ?? "新建研读"}</strong></div>
+          <div className="breadcrumb"><button className="mobile-menu icon-button" onClick={() => setSidebarCollapsed(false)} aria-label="打开导航"><Menu size={20} /></button><span>靶点研读</span><span className="breadcrumb-separator">/</span><strong>{currentSession?.title ?? "新建研读"}</strong></div>
           <div className="topbar-actions"><span className="mock-mode-label"><span className="live-dot" />Mock 模式</span><button className="topbar-button"><Search size={15} />搜索</button><button className="topbar-button"><Download size={15} />导出</button><button className="icon-button" aria-label="更多会话操作"><ChevronDown size={16} /></button></div>
         </header>
 
         <div className="conversation-viewport">
-          {!hasResearch ? <EmptyWorkspace onStart={startResearch} onTutorial={() => router.push("/tutorial")} /> : <div className="conversation-column">
+          {!hasResearch ? <EmptyWorkspace onPreset={setComposerSeed} onTutorial={() => router.push("/tutorial")} /> : <div className="conversation-column">
             <div className="conversation-intro"><span className="conversation-date">今天 · 14:32</span><span className="intro-rule" /><span className="conversation-cutoff">数据截至 {mockTargetCard.metadata.dataCutoff}</span></div>
             {conversation.length > 0 ? conversation.map((item, index) => item.kind === "user" ? <UserMessage key={`user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />) : <UserMessage text={defaultQuestion} />}
             {isResearching ? <ResearchProgress stage={stage} onRetry={() => setProgressIndex(Math.max(progressIndex - 1, 0))} /> : null}
@@ -110,16 +125,23 @@ export function WorkspaceShell() {
             {!isResearching && !memoVisible ? <button className="generate-memo-banner" onClick={() => setMemoVisible(true)}><span><Sparkles size={17} /><strong>生成差异化立项建议</strong><small>结合当前靶点卡、风险和竞争空间形成结构化 Decision Memo</small></span><ArrowLeft size={17} className="turn-right" /></button> : null}
           </div>}
         </div>
-        <ResearchComposer onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => setMemoVisible(true)} onExport={exportReport} disabled={isResearching} />
+        <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => setMemoVisible(true)} onExport={exportReport} disabled={isResearching || isAsking} />
       </main>
       <EvidenceDrawer evidence={drawerEvidence} onClose={() => setDrawerEvidence(null)} />
     </div>
   );
 }
 
-function EmptyWorkspace({ onStart, onTutorial }: { onStart: (question: string) => void; onTutorial: () => void }) {
-  const [value, setValue] = useState("");
-  const submit = () => { if (value.trim()) onStart(value.trim()); };
-  const presets = ["快速梳理靶点", "分析特定癌种", "判断药物形式", "查看临床进展", "检查失败风险", "生成差异化建议"];
-  return <div className="empty-workspace"><div className="empty-kicker"><span className="kicker-line" />TargetLens / Research workspace<span className="kicker-line" /></div><div className="empty-hero-mark"><div className="hero-ring hero-ring-one" /><div className="hero-ring hero-ring-two" /><div className="hero-core"><Sparkles size={22} /></div></div><h1>快速读懂一个肿瘤靶点</h1><p className="empty-subtitle">整合权威数据库、论文、临床试验与指南，<br />生成可追溯靶点卡，并支持连续追问与立项分析。</p><div className="empty-input-wrap"><textarea value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder="输入靶点，或描述你的研究问题…\n例如：ROR1 在三阴性乳腺癌中是否适合开发 ADC？" rows={3} aria-label="输入靶点或研究问题" /><div className="empty-input-bottom"><span>支持靶点、癌种、药物形式和研究问题</span><button className="empty-send" onClick={submit} disabled={!value.trim()} aria-label="开始研究"><ArrowLeft size={17} className="turn-right" /></button></div></div><div className="preset-row">{presets.map((preset) => <button key={preset} onClick={() => preset.includes("建议") ? onStart(defaultQuestion) : setValue(preset)}>{preset}</button>)}</div><div className="authority-row"><span>权威来源</span><strong>Open Targets</strong><i>·</i><strong>UniProt</strong><i>·</i><strong>PubMed</strong><i>·</i><strong>ClinicalTrials.gov</strong><i>·</i><strong>ChEMBL</strong></div><p className="empty-disclaimer">演示数据仅用于展示产品流程，不用于真实研发判断。<button onClick={onTutorial}>先去学习靶点研读方法 <ArrowLeft size={13} className="turn-right" /></button></p></div>;
+function EmptyWorkspace({ onPreset, onTutorial }: { onPreset: (question: string) => void; onTutorial: () => void }) {
+  const presets = [
+    ["靶点身份", "确认标准实体、别名和蛋白关系"],
+    ["患者分层", "寻找可检测的人群和标志物"],
+    ["药物形式", "比较 ADC、双抗和小分子逻辑"],
+    ["临床进展", "查看试验阶段与项目状态"],
+    ["安全窗口", "检查正常组织表达与红线"],
+    ["竞争格局", "梳理同靶点项目和差异化"],
+    ["文献综述", "汇总最新论文与证据强度"],
+    ["立项建议", "生成可验证、可退出的下一步"],
+  ] as const;
+  return <div className="empty-workspace"><div className="empty-kicker"><span className="kicker-line" />TargetLens / Research workspace<span className="kicker-line" /></div><div className="empty-hero-mark"><div className="hero-ring hero-ring-one" /><div className="hero-ring hero-ring-two" /><div className="hero-core"><Sparkles size={26} /></div></div><h1>快速读懂一个肿瘤靶点</h1><p className="empty-subtitle">整合权威数据库、论文、临床试验与指南，<br />生成可追溯靶点卡，并支持连续追问与立项分析。</p><div className="preset-heading"><span>从一个研究方向开始</span><small>选择后会带入下方输入框</small></div><div className="preset-grid" aria-label="研究方向快捷入口">{presets.map(([label, description]) => <button key={label} className="preset-card" onClick={() => onPreset(`${label}：${description}`)}><strong>{label}</strong><span>{description}</span></button>)}</div><div className="authority-row"><span>权威来源</span><strong>Open Targets</strong><i>·</i><strong>UniProt</strong><i>·</i><strong>PubMed</strong><i>·</i><strong>ClinicalTrials.gov</strong><i>·</i><strong>ChEMBL</strong></div><p className="empty-disclaimer">演示数据仅用于展示产品流程，不用于真实研发判断。<button onClick={onTutorial}>先去学习靶点研读方法 <ArrowLeft size={15} className="turn-right" /></button></p></div>;
 }

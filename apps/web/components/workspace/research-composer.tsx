@@ -1,19 +1,21 @@
 "use client";
 
 import { ArrowUp, FileText, Flag, LockKeyhole, Paperclip, Sparkles } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface ResearchComposerProps {
   onSubmit: (value: string) => void;
   onDecision: () => void;
   onExport: () => void;
+  initialValue?: string;
   disabled?: boolean;
 }
 
 const quickPrompts = ["快速梳理靶点", "分析患者分层", "判断药物形式", "检查失败风险", "生成差异化建议"];
 
-export function ResearchComposer({ onSubmit, onDecision, onExport, disabled = false }: ResearchComposerProps) {
-  const [value, setValue] = useState("");
+export function ResearchComposer({ onSubmit, onDecision, onExport, initialValue = "", disabled = false }: ResearchComposerProps) {
+  const [value, setValue] = useState(initialValue);
+  useEffect(() => setValue(initialValue), [initialValue]);
   const submit = () => {
     const trimmed = value.trim();
     if (!trimmed || disabled) return;

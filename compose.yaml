@@ -50,6 +50,9 @@ services:
   api:
     build:
       context: ./apps/api
+    env_file:
+      - path: ./apps/api/.env
+        required: false
     environment:
       TARGETLENS_ENV: development
       TARGETLENS_API_MODE: database
@@ -59,7 +62,7 @@ services:
       S3_ACCESS_KEY: targetlens
       S3_SECRET_KEY: targetlens_dev
       S3_BUCKET: targetlens-artifacts
-      CORS_ORIGINS: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
     ports:
       - "8000:8000"
     depends_on:

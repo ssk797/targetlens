@@ -16,14 +16,7 @@ interface HistorySidebarProps {
 
 export function HistorySidebar({ sessions, activeId, collapsed, onToggle, onSelect, onNew, onTutorial }: HistorySidebarProps) {
   if (collapsed) {
-    return (
-      <aside className="sidebar sidebar-collapsed" aria-label="折叠导航栏">
-        <div className="collapsed-mark"><Sparkles size={18} /></div>
-        <button className="collapsed-button" onClick={onNew} aria-label="新建靶点研读"><Plus size={18} /></button>
-        <button className="collapsed-button" onClick={onTutorial} aria-label="教程练习"><BookOpen size={18} /></button>
-        <button className="collapsed-button sidebar-bottom" onClick={onToggle} aria-label="展开侧栏"><ChevronRight size={18} /></button>
-      </aside>
-    );
+    return <><aside className="sidebar sidebar-collapsed" aria-label="折叠导航栏"><div className="collapsed-mark"><Sparkles size={22} /></div><button className="collapsed-button" onClick={onNew} aria-label="新建靶点研读"><Plus size={20} /></button><button className="collapsed-button" onClick={onTutorial} aria-label="教程练习"><BookOpen size={20} /></button><button className="collapsed-button sidebar-bottom" onClick={onToggle} aria-label="展开侧栏"><ChevronRight size={20} /></button></aside><button className="sidebar-reopen" onClick={onToggle} aria-label="展开侧栏"><ChevronRight size={20} /></button></>;
   }
 
   const pinned = sessions.filter((session) => session.pinned);

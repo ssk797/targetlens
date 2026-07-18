@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from pydantic import Field
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,8 +33,13 @@ class Settings(BaseSettings):
     s3_secret_key: str = Field(default="targetlens_dev", validation_alias="S3_SECRET_KEY")
     s3_bucket: str = Field(default="targetlens-artifacts", validation_alias="S3_BUCKET")
     web_origin: str = Field(default="http://localhost:3000", validation_alias="WEB_ORIGIN")
-    cors_origins: str = Field(default="http://localhost:3000", validation_alias="CORS_ORIGINS")
+    cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000", validation_alias="CORS_ORIGINS")
     data_cutoff: str | None = Field(default=None, validation_alias="DATA_CUTOFF")
+    ai_enabled: bool = Field(default=False, validation_alias="AI_ENABLED")
+    deepseek_api_key: SecretStr | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com", validation_alias="DEEPSEEK_BASE_URL")
+    deepseek_model_fast: str = Field(default="deepseek-v4-flash", validation_alias="DEEPSEEK_MODEL_FAST")
+    deepseek_model_reasoning: str = Field(default="deepseek-v4-pro", validation_alias="DEEPSEEK_MODEL_REASONING")
 
     @property
     def allowed_origins(self) -> list[str]:
