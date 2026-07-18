@@ -8,18 +8,30 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from app.core.config import settings
+from app.core.logging import configure_logging
 from app.schemas import HealthResponse, ResearchJob, Session, SessionCreate, now_utc
+from app.services.scoring.engine import calculate_score
+from app.services.scoring.schemas import (
+    EvidenceDimensions,
+    OpportunityDimensions,
+    RedlineInput,
+    RiskDimensions,
+    ScoreRequest,
+    ScoreResult,
+)
 
 app = FastAPI(title="TargetLens API", version="0.1.0", docs_url="/docs")
+configure_logging()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-DATA_CUTOFF = date.today().isoformat()
+DATA_CUTOFF = settings.data_cutoff or date.today().isoformat()
 SESSIONS: dict[str, Session] = {
     "session-ror1": Session(
         id="session-ror1",
@@ -34,7 +46,7 @@ SESSIONS: dict[str, Session] = {
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    return HealthResponse(status="ok", mode="mock", timestamp=now_utc())
+    return HealthResponse(status="ok", mode=settings.api_mode, timestamp=now_utc())
 
 
 @app.get("/api/v1/sessions", response_model=list[Session])
@@ -101,6 +113,61 @@ async def target_card(session_id: str) -> dict[str, object]:
     if session_id not in SESSIONS:
         raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
     return {"id": "card-ror1-v1", "session_id": session_id, "version": 1, "metadata": {"isMock": True, "generatedForDemo": True, "dataCutoff": DATA_CUTOFF}}
+
+
+def default_score_request() -> ScoreRequest:
+    return ScoreRequest(
+        opportunity=OpportunityDimensions(
+            unmet_need=82,
+            target_validation=74,
+            patient_selection=78,
+            modality_fit=72,
+            differentiation_space=61,
+            clinical_feasibility=58,
+            safety_controllability=53,
+        ),
+        risk=RiskDimensions(
+            normal_tissue_window=46,
+            known_safety_class_risk=48,
+            clinical_failure_risk=52,
+            regulatory_risk=38,
+            scientific_uncertainty=44,
+            competitive_window=67,
+        ),
+        evidence=EvidenceDimensions(
+            evidence_coverage=76,
+            source_authority=81,
+            cross_source_consistency=69,
+            freshness=73,
+            scope_clarity=78,
+        ),
+        redlines=[
+            RedlineInput(
+                id="target-expression-window",
+                name="正常组织表达窗口需人工复核",
+                triggered=True,
+                rationale="现有来源提示表达窗口仍有异质性，不能直接视为可控。",
+                evidence_ids=["ev-ror1-normal-tissue-01"],
+                mitigable=True,
+                requires_human_review=True,
+                recommendation_cap="PILOT",
+            )
+        ],
+    )
+
+
+@app.get("/api/v1/sessions/{session_id}/scores", response_model=ScoreResult)
+async def get_scores(session_id: str) -> ScoreResult:
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
+    return calculate_score(default_score_request())
+
+
+@app.post("/api/v1/sessions/{session_id}/scores", response_model=ScoreResult)
+async def calculate_session_scores(session_id: str, payload: ScoreRequest) -> ScoreResult:
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
+    return calculate_score(payload)
 
 
 @app.post("/api/v1/sessions/{session_id}/messages")

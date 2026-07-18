@@ -10,7 +10,9 @@
 - 证据抽屉、知识关系图谱降级表格、风险红线和可追溯元数据
 - 三轮 Mock 追问与结构化 Decision Memo
 - EGFR 教程首页与“靶点身份”“证据分级”两个可交互关卡
-- FastAPI Mock API 骨架，支持健康检查、会话、靶点卡和 SSE 研究进度
+- FastAPI API 骨架，支持健康检查、会话、靶点卡、SSE 研究进度和后端评分接口
+- `uv` 管理的后端依赖、结构化日志、SQLAlchemy ORM 与 Alembic 初始迁移
+- PostgreSQL、Redis、MinIO、API、Celery worker 的 `compose.yaml` 本地编排
 
 ## 启动前端
 
@@ -23,14 +25,28 @@ pnpm dev
 
 ## 启动后端
 
-需要 Python 环境安装 `apps/api/pyproject.toml` 中的依赖：
+使用 `uv` 安装并锁定后端依赖：
 
 ```bash
-python -m pip install -e apps/api
-python -m uvicorn app.main:app --app-dir apps/api --reload
+cd apps/api
+uv sync --extra dev
+uv run uvicorn app.main:app --reload
 ```
 
 健康检查：`http://localhost:8000/health`。
+
+## 启动本地基础设施
+
+Docker Desktop 启动后，在仓库根目录运行：
+
+```bash
+docker compose up --build
+```
+
+这会启动 PostgreSQL、Redis、MinIO、FastAPI 和 Celery worker，并由 API 容器执行
+`alembic upgrade head`。Compose 中的账号和密码只用于本机开发，部署前必须通过环境变量替换。
+
+后端评分接口：`GET /api/v1/sessions/{session_id}/scores`；评分规则在服务端计算，红线会单独限制建议等级并保留人工复核标记。
 
 ## 检查命令
 
@@ -39,6 +55,9 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
+cd apps/api && uv run pytest -q
+cd apps/api && uv run ruff check app tests
+cd apps/api && uv run mypy app --ignore-missing-imports
 ```
 
 ## 演示路径
