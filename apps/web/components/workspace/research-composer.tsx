@@ -12,11 +12,12 @@ interface ResearchComposerProps {
   sourceMode?: string;
   officialOnly?: boolean;
   onToggleOfficial?: () => void;
+  placeholder?: string;
 }
 
 const quickPrompts = ["快速梳理靶点", "分析患者分层", "判断药物形式", "检查失败风险", "生成差异化建议"];
 
-export function ResearchComposer({ onSubmit, onDecision, onExport, initialValue = "", disabled = false, sourceMode = "实时来源", officialOnly = false, onToggleOfficial }: ResearchComposerProps) {
+export function ResearchComposer({ onSubmit, onDecision, onExport, initialValue = "", disabled = false, sourceMode = "实时来源", officialOnly = false, onToggleOfficial, placeholder = "输入靶点或研究问题…" }: ResearchComposerProps) {
   const [value, setValue] = useState(initialValue);
   useEffect(() => setValue(initialValue), [initialValue]);
 
@@ -33,7 +34,7 @@ export function ResearchComposer({ onSubmit, onDecision, onExport, initialValue 
         {quickPrompts.map((prompt) => <button key={prompt} className="quick-chip" onClick={() => prompt.includes("建议") ? onDecision() : setValue(prompt)}>{prompt}</button>)}
       </div>
       <div className="composer-box">
-        <textarea value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder="继续追问当前靶点，或描述一个研究问题…" aria-label="继续追问当前靶点" rows={2} disabled={disabled} />
+        <textarea value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder={placeholder} aria-label={placeholder} rows={2} disabled={disabled} />
         <div className="composer-toolbar">
           <div className="composer-tools">
             <button className="composer-tool" aria-label="附加当前区块"><Paperclip size={15} />引用当前区块</button>

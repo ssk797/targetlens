@@ -15,15 +15,49 @@ from typing import Any
 from app.services.research.connectors import EvidenceHit, ResearchBundle
 
 
-TARGET_PATTERN = re.compile(r"(?<![A-Za-z])[A-Z][A-Z0-9-]{1,11}(?![A-Za-z])")
+TARGET_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9-]{1,15})(?![A-Za-z0-9])")
+TARGET_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "for", "from", "how", "in", "is", "it", "of", "on", "or", "the", "to", "what", "whether", "with", "worth",
+    "target", "program", "project", "evidence", "research", "study", "trial", "therapy", "development", "判断", "靶点",
+}
+MODALITY_WORDS = {"adc", "car-t", "protac", "bispecific", "antibody", "small", "molecule", "small-molecule", "双抗", "单抗", "小分子"}
+
+
+def _infer_target(normalized: str) -> str:
+    """Resolve a target token from either ``JAK2`` or ``jak2`` user input.
+
+    Gene symbols are often pasted in lowercase in chat.  We normalize the
+    symbol before querying connectors, while keeping the original question in
+    the session so the user's wording remains traceable.
+    """
+
+    candidates: list[tuple[int, int, str]] = []
+    for index, match in enumerate(TARGET_TOKEN_PATTERN.finditer(normalized)):
+        token = match.group(1)
+        lower = token.lower()
+        if lower in TARGET_STOP_WORDS or lower in MODALITY_WORDS:
+            continue
+        score = 0
+        if token.isupper():
+            score += 4
+        if re.fullmatch(r"[a-z]{2,8}\d{1,4}(?:-[a-z0-9]+)?", lower):
+            score += 7
+        if any(character.isdigit() for character in token):
+            score += 3
+        if "-" in token:
+            score += 1
+        if score:
+            candidates.append((score, -index, token))
+    if not candidates:
+        return "未解析靶点"
+    return max(candidates)[2].upper()
 
 
 def infer_scope(question: str) -> tuple[str, str | None, str]:
     """Infer a target, disease and modality from a natural-language question."""
 
     normalized = question.strip()
-    target_match = TARGET_PATTERN.search(normalized)
-    target = target_match.group(0) if target_match else "未解析靶点"
+    target = _infer_target(normalized)
 
     modality = None
     for candidate in ("ADC", "双抗", "单抗", "小分子", "PROTAC", "CAR-T", "small molecule", "small-molecule", "antibody", "bispecific"):
@@ -180,6 +214,33 @@ def build_target_card(
     graph_nodes = [{"id": node.id, "label": node.label, "type": node.type} for node in bundle.graph_nodes]
     source_names = ", ".join(_organization(item) for item in bundle.items[:3]) or "暂无返回来源"
     connector_note = f"；降级来源：{', '.join(degraded)}" if degraded else ""
+    connector_status = "DEGRADED" if degraded else ("READY" if bundle.connectors else "PENDING")
+    workflow = [
+        {
+            "id": "entity-resolution",
+            "label": "实体归一",
+            "status": "READY",
+            "detail": f"已识别 {target}",
+        },
+        {
+            "id": "authoritative-sources",
+            "label": "权威数据库",
+            "status": connector_status,
+            "detail": f"{ready_connectors}/{total_connectors} 个连接器返回",
+        },
+        {
+            "id": "literature-retrieval",
+            "label": "文献与临床",
+            "status": "READY" if literature_hits or clinical_hits else ("PARTIAL" if bundle.items else "PENDING"),
+            "detail": f"{len(literature_hits)} 篇文献 · {len(clinical_hits)} 条试验",
+        },
+        {
+            "id": "evidence-integration",
+            "label": "证据整合",
+            "status": "READY" if validation else "PENDING",
+            "detail": f"生成 {len(validation)} 条可追溯证据",
+        },
+    ]
     executive_summary = (
         f"{target} 的实时检索已覆盖 {ready_connectors}/{total_connectors} 个来源，返回 {len(bundle.items)} 条记录（{source_names}）。"
         f" 这些记录支持继续做范围明确的验证，但不能单独替代药理、毒理、临床或监管判断{connector_note}。"
@@ -296,6 +357,7 @@ def build_target_card(
             "generatedForDemo": is_mock,
             "dataCutoff": cutoff,
             "disclaimer": "实时公共来源已归一化展示；本卡不替代药理、毒理、临床或监管判断。",
+            "workflow": workflow,
         },
     }
 

@@ -59,18 +59,6 @@ export function WorkspaceShell() {
   const stage = progressSequence[progressIndex];
 
   useEffect(() => {
-    let cancelled = false;
-    void httpClient.listSessions().then((remoteSessions) => {
-      if (cancelled || remoteSessions.length === 0) return;
-      // In live mode the API is the source of truth.  Do not keep the old
-      // CCR8/EGFR mock rows beside real sessions, otherwise selecting one
-      // would issue misleading 404 calls and look like a broken record.
-      setSessions(remoteSessions);
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
     if (!isResearching) return;
     const timer = window.setInterval(() => setProgressIndex((current) => Math.min(current + 1, progressSequence.length - 1)), 700);
     return () => window.clearInterval(timer);
@@ -78,6 +66,7 @@ export function WorkspaceShell() {
 
   const loadSession = useCallback(async (id: string) => {
     setActiveId(id);
+    window.sessionStorage.setItem("targetlens.activeSession", id);
     setLoadingSession(true);
     setDrawerEvidence(null);
     try {
@@ -111,7 +100,21 @@ export function WorkspaceShell() {
   }, []);
 
   useEffect(() => {
-    void loadSession("session-ror1");
+    let cancelled = false;
+    const initializeWorkspace = async () => {
+      try {
+        const remoteSessions = await httpClient.listSessions();
+        if (cancelled) return;
+        if (remoteSessions.length > 0) setSessions(remoteSessions);
+        const storedId = window.sessionStorage.getItem("targetlens.activeSession");
+        const initialId = storedId && remoteSessions.some((session) => session.id === storedId) ? storedId : remoteSessions[0]?.id ?? "session-ror1";
+        await loadSession(initialId);
+      } catch {
+        if (!cancelled) await loadSession("session-ror1");
+      }
+    };
+    void initializeWorkspace();
+    return () => { cancelled = true; };
   }, [loadSession]);
 
   const startResearch = async (question: string) => {
@@ -127,6 +130,7 @@ export function WorkspaceShell() {
       const session = await httpClient.createSession({ question });
       setSessions((existing) => [session, ...existing.filter((item) => item.id !== session.id)]);
       setActiveId(session.id);
+      window.sessionStorage.setItem("targetlens.activeSession", session.id);
       setHasResearch(true);
       await httpClient.startResearch(session.id, { question, officialOnly });
       const [card, score] = await Promise.all([httpClient.getTargetCard(session.id), httpClient.getScores(session.id)]);
@@ -176,6 +180,7 @@ export function WorkspaceShell() {
 
   const handleNew = () => {
     setActiveId(null);
+    window.sessionStorage.removeItem("targetlens.activeSession");
     setHasResearch(false);
     setConversation([]);
     setCurrentCard(null);
@@ -255,10 +260,10 @@ export function WorkspaceShell() {
             {!isResearching && currentCard ? <TargetCard card={currentCard} onEvidence={setDrawerEvidence} onExport={exportReport} onRefresh={() => void refreshResearch()} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} /> : null}
             {!isResearching && currentCard && memoVisible && currentMemo ? <DecisionMemo memo={currentMemo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} /> : null}
             {!isResearching && currentScore ? <ScorePanel score={currentScore} onEvidence={openEvidence} /> : null}
-            {!isResearching && currentCard && !memoVisible ? <button className="generate-memo-banner" onClick={() => void generateMemo()}><span><Sparkles size={17} /><strong>生成差异化立项建议</strong><small>结合当前靶点卡、风险和竞争空间形成结构化 Decision Memo</small></span><ArrowLeft size={17} className="turn-right" /></button> : null}
+            {!isResearching && currentCard && !memoVisible ? <button className="generate-memo-banner" onClick={() => void generateMemo()}><span><Sparkles size={17} /><strong>生成立项建议</strong><small>基于当前证据、风险和竞争信号形成可验证的下一步</small></span><ArrowLeft size={17} className="turn-right" /></button> : null}
           </div>}
         </div>
-        <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => void generateMemo()} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} />
+        <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => void generateMemo()} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />
       </main>
       <EvidenceDrawer evidence={drawerEvidence} onClose={() => setDrawerEvidence(null)} />
     </div>
@@ -276,5 +281,5 @@ function EmptyWorkspace({ onPreset, onTutorial }: { onPreset: (question: string)
     ["文献综述", "汇总最新论文与证据强度"],
     ["立项建议", "生成可验证、可退出的下一步"],
   ] as const;
-  return <div className="empty-workspace"><div className="empty-kicker"><span className="kicker-line" />TargetLens / Research workspace<span className="kicker-line" /></div><div className="empty-hero-mark"><div className="hero-ring hero-ring-one" /><div className="hero-ring hero-ring-two" /><div className="hero-core"><Sparkles size={26} /></div></div><h1>快速读懂一个肿瘤靶点</h1><p className="empty-subtitle">整合权威数据库、论文、临床试验与指南，<br />生成可追溯靶点卡，并支持连续追问与立项分析。</p><div className="preset-heading"><span>从一个研究方向开始</span><small>选择后会带入下方输入框</small></div><div className="preset-grid" aria-label="研究方向快捷入口">{presets.map(([label, description]) => <button key={label} className="preset-card" onClick={() => onPreset(`${label}：${description}`)}><strong>{label}</strong><span>{description}</span></button>)}</div><div className="authority-row"><span>权威来源</span><strong>Open Targets</strong><i>·</i><strong>UniProt</strong><i>·</i><strong>PubMed</strong><i>·</i><strong>ClinicalTrials.gov</strong><i>·</i><strong>ChEMBL</strong></div><p className="empty-disclaimer">实时来源会在提交后按靶点重新检索，不会复用其他会话的靶点卡。<button onClick={onTutorial}>先去学习靶点研读方法 <ArrowLeft size={15} className="turn-right" /></button></p></div>;
+  return <div className="empty-workspace"><div className="empty-kicker"><span className="kicker-line" />TargetLens · 真实研究工作台<span className="kicker-line" /></div><div className="empty-hero-mark"><div className="hero-ring hero-ring-one" /><div className="hero-ring hero-ring-two" /><div className="hero-core"><Sparkles size={26} /></div></div><h1>从一个靶点问题开始</h1><p className="empty-subtitle">输入基因、蛋白或研究问题，系统会按步骤检索权威来源，<br />整理为可追溯的小卡片，再支持连续追问。</p><div className="preset-heading"><span>你可以先看这几类问题</span><small>点击后仍需提交才会开始检索</small></div><div className="preset-grid" aria-label="研究方向快捷入口">{presets.map(([label, description]) => <button key={label} className="preset-card" onClick={() => onPreset(`${label}：${description}`)}><strong>{label}</strong><span>{description}</span></button>)}</div><div className="authority-row"><span>检索来源</span><strong>Open Targets</strong><i>·</i><strong>UniProt</strong><i>·</i><strong>PubMed</strong><i>·</i><strong>ClinicalTrials.gov</strong><i>·</i><strong>ChEMBL</strong></div><p className="empty-disclaimer">每次提交都会按当前靶点重新检索，不会复用其他会话的靶点卡。<button onClick={onTutorial}>了解研读步骤 <ArrowLeft size={15} className="turn-right" /></button></p></div>;
 }

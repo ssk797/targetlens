@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.research.card_builder import infer_scope
 from app.services.research.connectors import ConnectorResult, ResearchBundle
 
 
@@ -21,6 +22,13 @@ def test_create_and_fetch_session() -> None:
     fetched = client.get(f"/api/v1/sessions/{session_id}")
     assert fetched.status_code == 200
     assert fetched.json()["question"].startswith("EGFR")
+
+
+def test_infer_scope_normalizes_lowercase_target_input() -> None:
+    target, disease, modality = infer_scope("jak2 在骨髓增殖性肿瘤中是否适合开发小分子？")
+    assert target == "JAK2"
+    assert disease == "骨髓增殖性肿瘤"
+    assert modality == "小分子"
 
 
 def test_research_returns_accepted_job() -> None:
@@ -75,6 +83,7 @@ def test_research_card_and_message_history_keep_target_context() -> None:
     assert card["target"]["symbol"] == "JAK2"
     assert card["scope"]["modality"] == "小分子"
     assert card["metadata"]["isMock"] is True
+    assert [step["label"] for step in card["metadata"]["workflow"]] == ["实体归一", "权威数据库", "文献与临床", "证据整合"]
 
     answer = client.post(f"/api/v1/sessions/{session_id}/messages", json={"question": "下一步补什么证据？"})
     assert answer.status_code == 200

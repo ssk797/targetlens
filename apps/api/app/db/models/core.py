@@ -152,6 +152,32 @@ class RelationFact(Base):
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class KnowledgeGraphFact(Base):
+    """Reusable, first-party graph facts built from normalized research runs.
+
+    ``RelationFact`` remains session-scoped for audit history.  This table is
+    the durable TargetLens graph library: a later question can reuse a
+    previously observed relation without exposing the graph as a UI card.
+    """
+
+    __tablename__ = "knowledge_graph_fact"
+    __table_args__ = (UniqueConstraint("target_key", "subject", "predicate", "object", name="uq_knowledge_graph_fact_relation"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    target_key: Mapped[str] = mapped_column(String(200), index=True)
+    subject: Mapped[str] = mapped_column(String(500))
+    subject_label: Mapped[str] = mapped_column(String(500))
+    subject_type: Mapped[str] = mapped_column(String(64))
+    predicate: Mapped[str] = mapped_column(String(128))
+    object: Mapped[str] = mapped_column(String(500))
+    object_label: Mapped[str] = mapped_column(String(500))
+    object_type: Mapped[str] = mapped_column(String(64))
+    evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_connectors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class RiskEvent(Base):
     __tablename__ = "risk_event"
 

@@ -199,7 +199,22 @@ class ResearchAggregator:
     async def search(self, target: str, disease: str | None = None, modality: str | None = None) -> ResearchBundle:
         timeout = httpx.Timeout(30.0, connect=8.0)
         async with httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "TargetLens/0.2 research-connector"}) as client:
-            results = await asyncio.gather(*(connector.safe_search(client, target, disease) for connector in self.connectors))
+            # Run the research workflow in deliberate passes.  Structured
+            # authorities resolve the entity first; literature and trial
+            # registries then use that normalized target scope.  Each pass is
+            # still concurrent internally, so one slow connector cannot block
+            # its peers or erase a partial result.
+            connector_by_name = {connector.name: connector for connector in self.connectors}
+            ordered_passes = (
+                ("uniprot", "open_targets", "chembl"),
+                ("pubmed", "clinicaltrials"),
+            )
+            pass_results: list[ConnectorResult] = []
+            for connector_names in ordered_passes:
+                pass_results.extend(
+                    await asyncio.gather(*(connector_by_name[name].safe_search(client, target, disease) for name in connector_names if name in connector_by_name))
+                )
+            results = pass_results
         items = [item for result in results for item in result.items]
         target_node = f"target:{target.lower().replace(' ', '-') }"
         graph_nodes = [GraphNode(id=target_node, label=target, type="target")]

@@ -118,11 +118,19 @@ export interface TargetConclusion {
   unknowns: string[];
 }
 
+export interface ResearchWorkflowStep {
+  id: string;
+  label: string;
+  status: "READY" | "PARTIAL" | "DEGRADED" | "PENDING";
+  detail: string;
+}
+
 export interface CardMetadata {
   isMock: boolean;
   generatedForDemo: boolean;
   dataCutoff: string;
   disclaimer: string;
+  workflow?: ResearchWorkflowStep[];
 }
 
 export interface TargetCard {

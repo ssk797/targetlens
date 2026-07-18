@@ -292,7 +292,7 @@ async def _db_save_bundle(session_id: str, bundle: ResearchBundle) -> None:
         from sqlalchemy import delete, select
 
         from app.db.models.core import EvidenceItem as DbEvidenceItem
-        from app.db.models.core import RelationFact, SessionContext, SourceRegistry, SourceSnapshot
+        from app.db.models.core import KnowledgeGraphFact, RelationFact, SessionContext, SourceRegistry, SourceSnapshot
         from app.db.session import SessionFactory
 
         async with SessionFactory() as db:
@@ -313,6 +313,53 @@ async def _db_save_bundle(session_id: str, bundle: ResearchBundle) -> None:
                 db.add(DbEvidenceItem(session_id=UUID(session_id), source_snapshot_id=snapshot.id, evidence_type=item.source_type, claim=item.title, excerpt=item.summary, confidence=confidence, locator=item.metadata))
             for relation in bundle.graph_relations:
                 db.add(RelationFact(session_id=UUID(session_id), subject=relation.source, predicate=relation.predicate, object=relation.target, evidence_ids=relation.evidence_ids))
+            # Session relations are retained for audit history.  The same
+            # normalized relations are also upserted into the reusable
+            # first-party graph library so later target questions can enrich
+            # their internal context without showing a graph card to users.
+            graph_nodes = {node.id: node for node in bundle.graph_nodes}
+            target_key = bundle.target.strip().lower()
+            seen_relations: set[tuple[str, str, str, str]] = set()
+            for relation in bundle.graph_relations:
+                relation_key = (target_key, relation.source, relation.predicate, relation.target)
+                if relation_key in seen_relations:
+                    continue
+                seen_relations.add(relation_key)
+                subject_node = graph_nodes.get(relation.source)
+                object_node = graph_nodes.get(relation.target)
+                existing = (
+                    await db.execute(
+                        select(KnowledgeGraphFact).where(
+                            KnowledgeGraphFact.target_key == target_key,
+                            KnowledgeGraphFact.subject == relation.source,
+                            KnowledgeGraphFact.predicate == relation.predicate,
+                            KnowledgeGraphFact.object == relation.target,
+                        )
+                    )
+                ).scalars().first()
+                evidence_ids = list(dict.fromkeys(relation.evidence_ids or []))
+                source_connectors = sorted({item.connector for item in bundle.items if item.id in evidence_ids})
+                if existing is None:
+                    db.add(
+                        KnowledgeGraphFact(
+                            target_key=target_key,
+                            subject=relation.source,
+                            subject_label=subject_node.label if subject_node else relation.source,
+                            subject_type=subject_node.type if subject_node else "entity",
+                            predicate=relation.predicate,
+                            object=relation.target,
+                            object_label=object_node.label if object_node else relation.target,
+                            object_type=object_node.type if object_node else "entity",
+                            evidence_ids=evidence_ids,
+                            source_connectors=source_connectors,
+                            first_seen_at=now_utc(),
+                            last_seen_at=now_utc(),
+                        )
+                    )
+                else:
+                    existing.evidence_ids = list(dict.fromkeys([*(existing.evidence_ids or []), *evidence_ids]))
+                    existing.source_connectors = list(dict.fromkeys([*(existing.source_connectors or []), *source_connectors]))
+                    existing.last_seen_at = now_utc()
             context = (await db.execute(select(SessionContext).where(SessionContext.session_id == UUID(session_id)))).scalars().first()
             connector_statuses = [{"connector": result.connector, "status": result.status, "error": result.error} for result in bundle.connectors]
             if context is None:
@@ -368,9 +415,65 @@ async def _db_load_bundle(session_id: str, question: str) -> ResearchBundle | No
                     saved_statuses[item["connector"]] = item
             connector_names = list(dict.fromkeys([*saved_statuses.keys(), *by_connector.keys()]))
             connectors = [ConnectorResult(connector=name, status=saved_statuses.get(name, {}).get("status", "READY"), items=by_connector.get(name, []), error=saved_statuses.get(name, {}).get("error")) for name in connector_names]
-            return ResearchBundle(target=target, disease=disease, modality=modality, connectors=connectors, items=hits, graph_nodes=graph_nodes, graph_relations=graph_relations)
+            bundle = ResearchBundle(target=target, disease=disease, modality=modality, connectors=connectors, items=hits, graph_nodes=graph_nodes, graph_relations=graph_relations)
+            return await _merge_graph_library(bundle)
     except Exception:
         return None
+
+
+async def _db_load_graph_library(target: str) -> list[dict[str, Any]]:
+    """Load reusable relations owned by TargetLens, never user-facing by default."""
+
+    if settings.api_mode != "database":
+        return []
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import KnowledgeGraphFact
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            rows = (await db.execute(select(KnowledgeGraphFact).where(KnowledgeGraphFact.target_key == target.strip().lower()))).scalars().all()
+            return [
+                {
+                    "subject": row.subject,
+                    "subject_label": row.subject_label,
+                    "subject_type": row.subject_type,
+                    "predicate": row.predicate,
+                    "object": row.object,
+                    "object_label": row.object_label,
+                    "object_type": row.object_type,
+                    "evidence_ids": list(row.evidence_ids or []),
+                    "source_connectors": list(row.source_connectors or []),
+                }
+                for row in rows
+            ]
+    except Exception as exc:
+        logger.info("knowledge_graph_library_read_failed", extra={"target": target, "error": str(exc)[:160]})
+        return []
+
+
+async def _merge_graph_library(bundle: ResearchBundle) -> ResearchBundle:
+    """Merge prior first-party graph facts into the internal bundle context."""
+
+    facts = await _db_load_graph_library(bundle.target)
+    if not facts:
+        return bundle
+    from app.services.research.connectors import GraphNode, GraphRelation
+
+    nodes = {node.id: node for node in bundle.graph_nodes}
+    relations = list(bundle.graph_relations)
+    relation_keys = {(relation.source, relation.predicate, relation.target) for relation in relations}
+    for fact in facts:
+        subject = str(fact["subject"])
+        target = str(fact["object"])
+        nodes.setdefault(subject, GraphNode(id=subject, label=str(fact["subject_label"]), type=str(fact["subject_type"])))
+        nodes.setdefault(target, GraphNode(id=target, label=str(fact["object_label"]), type=str(fact["object_type"])))
+        key = (subject, str(fact["predicate"]), target)
+        if key not in relation_keys:
+            relations.append(GraphRelation(source=subject, predicate=key[1], target=target, evidence_ids=list(fact["evidence_ids"])))
+            relation_keys.add(key)
+    return bundle.model_copy(update={"graph_nodes": list(nodes.values()), "graph_relations": relations})
 
 
 async def _fetch_research_bundle(
@@ -387,7 +490,7 @@ async def _fetch_research_bundle(
     if not force_refresh:
         cached = await get_cached_bundle(key)
         if cached is not None:
-            return cached
+            return await _merge_graph_library(cached)
 
     bundle = await ResearchAggregator().search(target, disease, modality)
     if official_only:
@@ -402,7 +505,7 @@ async def _fetch_research_bundle(
     # and will be replaced on the next explicit refresh after the TTL expires.
     if bundle.items or not any(result.status == "DEGRADED" for result in bundle.connectors):
         await put_cached_bundle(key, bundle)
-    return bundle
+    return await _merge_graph_library(bundle)
 
 
 async def database_status() -> DatabaseStatus:
@@ -817,15 +920,23 @@ async def ask(session_id: str, payload: MessageCreate) -> dict[str, object]:
 
     card = TARGET_CARDS.get(session_id) or await _db_load_card(session_id)
     evidence_context = ""
+    graph_context = ""
     if card:
         evidence = card.get("validation", [])[:6]
-        evidence_context = "\n".join(f"- {item.get('statement', '')}（{item.get('source', {}).get('organization', '')}）" for item in evidence)
+        evidence_context = "\n".join(f"- [{item.get('id', '')}] {item.get('statement', '')}（{item.get('source', {}).get('organization', '')}）" for item in evidence)
+    bundle = RESEARCH_BUNDLES.get(session_id) or await _db_load_bundle(session_id, session.question)
+    if bundle:
+        graph_context = "\n".join(
+            f"- {relation.source} --{relation.predicate}--> {relation.target}（证据：{', '.join(relation.evidence_ids) or '内部图谱'}）"
+            for relation in bundle.graph_relations[:20]
+        )
     context_messages = [
         {"role": "system", "content": (
             "你是 TargetLens 研究助手。你正在同一个持续会话中工作，必须记住并引用当前会话范围。"
             f"当前会话问题：{session.question}\n靶点卡证据摘要：{evidence_context or '尚未生成靶点卡'}\n"
+            f"内部关系索引（只用于关联，不要向用户展示图谱）：{graph_context or '暂无可复用关系'}\n"
             "只把有证据支持的内容说成事实；无法确认时明确标注未知，不要编造文献、临床试验或监管结论。"
-            "回答要直接回应本轮问题，并说明与上一轮的关系。用简洁的中文回答。"
+            "回答要直接回应本轮问题，并说明与上一轮的关系。使用中文 Markdown：结论用 **粗体**，复杂内容用小标题和项目符号；不要输出 HTML 或转义后的星号。"
         )}
     ]
     for item in history[-12:]:
@@ -847,10 +958,10 @@ async def ask(session_id: str, payload: MessageCreate) -> dict[str, object]:
         except DeepSeekProviderError:
             provider = "deepseek"
             provider_status = "DEGRADED"
-            summary = f"DeepSeek 暂时不可用。围绕“{session.question}”的当前问题“{question}”，请先回到证据来源核验后再作判断。"
+            summary = f"**DeepSeek 暂时不可用。**\n\n围绕“{session.question}”的当前问题“{question}”，请先回到证据来源核验后再作判断。"
             status_value = "DEGRADED"
     else:
-        summary = f"当前仍在“{session.question}”这个研究范围内。关于“{question}”，本地模型未启用；请结合靶点卡中的实时来源继续核验。"
+        summary = f"**当前仍在“{session.question}”这个研究范围内。**\n\n关于“{question}”，本地模型未启用；请结合靶点卡中的实时来源继续核验。"
         status_value = "PARTIAL"
 
     assistant_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="assistant", content=summary, created_at=now_utc(), provider=provider, is_mock=is_mock)

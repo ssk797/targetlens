@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDownRight, ArrowUpRight, ChevronDown, CircleDot, ExternalLink, FlaskConical, GitBranch, Info, ShieldAlert } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, ChevronDown, CircleDot, ExternalLink, FlaskConical, Info, ShieldAlert } from "lucide-react";
 import type { EvidenceItem, TargetCard as TargetCardData } from "@/lib/types/domain";
 import { EvidenceBadge, SourceTierBadge } from "@/components/ui/evidence-badge";
 import { StatusPill } from "@/components/ui/status-pill";
@@ -21,6 +21,7 @@ export function TargetCard({ card, onEvidence, onExport, onRefresh, officialOnly
   const openFirstEvidence = () => { if (firstEvidence) onEvidence(firstEvidence); };
   const openLastEvidence = () => { if (lastEvidence) onEvidence(lastEvidence); };
   const statusTone = card.metadata.isMock ? "amber" : "green";
+  const workflow = card.metadata.workflow ?? [];
 
   return (
     <article className="target-card">
@@ -48,9 +49,11 @@ export function TargetCard({ card, onEvidence, onExport, onRefresh, officialOnly
       <div className="target-card-body">
         <section className="executive-summary">
           <div className="summary-marker"><CircleDot size={18} /></div>
-          <div><p className="eyebrow">Executive readout</p><h3>{card.conclusions.verdict.split("。")[0]}</h3><p>{card.executiveSummary}</p></div>
+          <div><p className="eyebrow">研究摘要</p><h3>{card.conclusions.verdict.split("。")[0]}</h3><p>{card.executiveSummary}</p></div>
           <StatusPill tone={card.metadata.isMock ? "amber" : "blue"}>{card.metadata.isMock ? "离线复核" : "待人工复核"}</StatusPill>
         </section>
+
+        {workflow.length > 0 ? <section className="workflow-rail" aria-label="本次检索步骤"><div className="workflow-rail-head"><span className="mini-label">本次检索路径</span><span>按实体、来源、文献到证据逐步整合</span></div><div className="workflow-steps">{workflow.map((step, index) => <div className={`workflow-step workflow-${step.status.toLowerCase()}`} key={step.id}><span className="workflow-index">{String(index + 1).padStart(2, "0")}</span><div><strong>{step.label}</strong><small>{step.detail}</small></div></div>)}</div></section> : null}
 
         <div className="target-sections">
           <EvidenceSection number="01" title="生物学功能" summary={card.biology.summary} evidenceCount={Math.min(2, card.validation.length)} onEvidence={openFirstEvidence}>
@@ -86,11 +89,7 @@ export function TargetCard({ card, onEvidence, onExport, onRefresh, officialOnly
             <div className="risk-list">{card.risks.map((risk) => <button className="risk-row" key={risk.id} onClick={() => { const evidence = evidenceById.get(risk.sourceId) ?? lastEvidence; if (evidence) onEvidence(evidence); }}><span className={`risk-severity risk-${risk.severity.toLowerCase()}`}>{risk.severity}</span><span className="risk-type">{risk.type}</span><span className="risk-main"><strong>{risk.title}</strong><small>{risk.fact}</small></span><span className="risk-impact">{risk.impact}</span><ArrowUpRight size={15} /></button>)}</div>
           </EvidenceSection>
 
-          <EvidenceSection number="08" title="知识关系" summary="默认展示 1–2 跳关系；点击节点或边可以回到证据来源。" evidenceCount={card.graph.edges.length} onEvidence={openFirstEvidence}>
-            <div className="graph-board"><div className="graph-caption"><span><GitBranch size={15} />关系图谱 · 当前检索</span><span>节点 {card.graph.nodes.length} · 关系 {card.graph.edges.length}</span></div><div className="graph-canvas">{card.graph.nodes.map((node, index) => <button key={node.id} className={`graph-node graph-node-${index + 1}`} onClick={() => { const evidence = card.validation[index % Math.max(card.validation.length, 1)]; if (evidence) onEvidence(evidence); }}><span>{node.type}</span><strong>{node.label}</strong></button>)}<div className="graph-line line-1" /><div className="graph-line line-2" /><div className="graph-line line-3" /><div className="graph-line line-4" /></div><div className="graph-legend"><span><i className="legend-dot legend-target" />靶点</span><span><i className="legend-dot legend-disease" />疾病</span><span><i className="legend-dot legend-modality" />药物形式</span><span><i className="legend-dot legend-risk" />风险</span></div></div>
-          </EvidenceSection>
-
-          <EvidenceSection number="09" title="结论与未知项" summary={card.conclusions.verdict} evidenceCount={card.conclusions.unknowns.length} onEvidence={openLastEvidence}>
+          <EvidenceSection number="08" title="结论与未知项" summary={card.conclusions.verdict} evidenceCount={card.conclusions.unknowns.length} onEvidence={openLastEvidence}>
             <div className="conclusion-grid"><div className="conclusion-verdict"><span className="verdict-arrow"><ArrowUpRight size={16} /></span><p>{card.conclusions.verdict}</p></div><div><p className="mini-label">结论边界</p><ul className="compact-list muted-list">{card.conclusions.boundaries.map((item) => <li key={item}>{item}</li>)}</ul></div><div><p className="mini-label">待回答问题</p><ul className="compact-list">{card.conclusions.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
           </EvidenceSection>
         </div>

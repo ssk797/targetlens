@@ -11,7 +11,7 @@
 - 靶点研读工作台、证据抽屉、连续追问、差异化建议、评分面板。
 - EGFR 教程首页与两个可交互关卡。
 - FastAPI API 骨架与 CORS/环境配置。
-- `uv.lock` 依赖锁定、结构化日志、SQLAlchemy ORM 及 17 张核心表。
+- `uv.lock` 依赖锁定、结构化日志、SQLAlchemy ORM 及 18 张核心表。
 - Alembic `0001_initial_targetlens` 初始迁移。
 - PostgreSQL / Redis / MinIO / API / Celery worker 的 Compose 编排。
 - 服务端确定性评分引擎、红线推荐上限与评分接口。
@@ -27,9 +27,9 @@
 
 - `pnpm lint`：通过。
 - `pnpm typecheck`：通过。
-- `pnpm test`：通过，2 个前端测试。
+- `pnpm test`：通过，3 个前端测试。
 - `pnpm build`：通过，工作台和教程路由均静态构建。
-- `cd apps/api && uv run pytest -q`：通过，9 个后端测试；有 1 条 Starlette/httpx 弃用提示。
+- `cd apps/api && uv run pytest -q`：通过，13 个后端测试；有 1 条 Starlette/httpx 弃用提示。
 - `cd apps/api && uv run ruff check app tests`：通过。
 - `cd apps/api && uv run mypy app --ignore-missing-imports`：通过。
 - `cd apps/api && uv run alembic upgrade head --sql`：离线迁移 SQL 生成通过。
@@ -62,3 +62,12 @@
 - JAK2 已接入 PubMed / Europe PMC、UniProt、Open Targets、ChEMBL 与 ClinicalTrials.gov 连接器，结果写入 PostgreSQL 的来源快照、证据项、关系事实和会话上下文。
 - Redis 增加归一化研究结果缓存；单个来源降级会保留其他来源，并通过 SSE `research.partial_failure` 明确呈现。
 - 评分和 Decision Memo 已改为读取当前靶点卡；离线演示只在明确无实时连接时出现，正式 SSO、权限与生产级限流仍列为部署阶段工作。
+
+## 2026-07-19 真实检索与内部图谱优化
+
+- 输入支持大小写无关的靶点实体归一，例如 `jak2` 会在检索前统一为 `JAK2`，不再依赖预置靶点卡。
+- 动态卡片增加“实体归一 → 权威数据库 → 文献与临床 → 证据整合”检索路径，并显示每一步的真实返回数量和降级状态。
+- 新增 `knowledge_graph_fact` 自建图谱库：每次检索的关系会持久化、去重并按靶点复用，图谱只作为内部上下文，不在用户卡片中展示。
+- DeepSeek 回答统一按 Markdown 排版渲染，支持粗体、标题、列表、引用、代码和链接，避免把 `**`、反斜杠等原始标记直接显示给用户。
+- 首页输入框改为“输入靶点或研究问题”，卡片摘要、检索路径和立项建议文案统一为中文任务语言。
+- Alembic `0002_knowledge_graph_library` 已在线执行，Compose 数据库中已保存 JAK2 的 19 条内部关系。
