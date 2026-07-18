@@ -67,6 +67,7 @@ kbd { margin-left: auto; border: 1px solid rgba(220, 232, 247, 0.18); border-rad
 .session-item { position: relative; display: grid; width: 100%; gap: 3px; padding: 9px 28px 9px 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #d8e2ee; text-align: left; }
 .session-item:hover { background: rgba(255,255,255,0.06); }
 .session-item-active { border-color: rgba(165, 202, 241, 0.25); background: #294767; }
+.session-select { display: grid; width: 100%; gap: 3px; padding: 0; background: transparent; color: inherit; text-align: left; }
 .session-item-main, .session-item-meta { display: flex; align-items: center; min-width: 0; gap: 7px; }
 .session-item-main { color: #f2f6fb; font-size: 12px; font-weight: 600; }
 .session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -74,8 +75,15 @@ kbd { margin-left: auto; border: 1px solid rgba(220, 232, 247, 0.18); border-rad
 .session-item-meta span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-status-dot, .live-dot, .source-online, .status-dot { display: inline-block; width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #8395aa; }
 .session-status-ready { background: #57c48a; }.session-status-updated { background: #e6ad54; }.session-status-draft { background: #8a9cb2; }.session-status-processing { background: #64a5e9; }
-.session-more { position: absolute; top: 13px; right: 8px; display: none; color: #94a9c0; }
-.session-item:hover .session-more, .session-item-active .session-more { display: block; }
+.session-more-button { position: absolute; top: 8px; right: 6px; display: grid; width: 25px; height: 25px; place-items: center; border-radius: 5px; background: transparent; color: #94a9c0; opacity: 0; }
+.session-item:hover .session-more-button, .session-item-active .session-more-button, .session-more-button[aria-expanded="true"] { opacity: 1; }
+.session-more-button:hover { background: rgba(255,255,255,0.12); color: #fff; }
+.session-menu { position: absolute; z-index: 30; top: 36px; right: 7px; display: grid; min-width: 132px; padding: 4px; border: 1px solid rgba(189, 211, 235, 0.35); border-radius: 8px; background: #18304b; box-shadow: 0 12px 28px rgba(8, 20, 35, 0.35); }
+.session-menu button { display: flex; align-items: center; gap: 7px; padding: 7px 8px; border-radius: 5px; background: transparent; color: #dce8f5; font-size: 11px; text-align: left; }
+.session-menu button:hover { background: rgba(255,255,255,0.1); }
+.session-menu-danger { color: #ffc1b8 !important; }
+.header-action-active { color: #1f67b1; background: #eef6ff; border-color: #c8dff7; }
+.composer-tool-active { color: #1f67b1 !important; background: #eef6ff !important; }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; width: fit-content; padding: 3px 7px; border: 1px solid transparent; border-radius: 999px; font-size: 10px; font-weight: 700; line-height: 1.2; white-space: nowrap; }
 .status-pill-blue { border-color: #cadcf4; background: var(--brand-soft); color: var(--brand); }.status-pill-green { border-color: #cbe8d9; background: var(--success-soft); color: var(--success); }.status-pill-amber { border-color: #f1ddb8; background: var(--warning-soft); color: var(--warning); }.status-pill-red { border-color: #f0cfcf; background: var(--danger-soft); color: var(--danger); }.status-pill-slate { border-color: var(--border); background: var(--surface-muted); color: var(--text-secondary); }
 .status-pill .status-dot { width: 5px; height: 5px; flex-basis: 5px; background: currentColor; }

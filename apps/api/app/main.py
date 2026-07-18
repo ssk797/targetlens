@@ -1,17 +1,35 @@
 import asyncio
+import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from datetime import date
-from uuid import uuid4
+from typing import Any, Literal, cast
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
 from app.core.logging import configure_logging
-from app.schemas import DatabaseStatus, HealthResponse, MessageCreate, ResearchJob, ResearchPreviewRequest, Session, SessionCreate, now_utc
+from app.schemas import (
+    DatabaseStatus,
+    HealthResponse,
+    MessageCreate,
+    ReportCreate,
+    ResearchJob,
+    ResearchPreviewRequest,
+    ResearchStart,
+    Session,
+    SessionCreate,
+    SessionMessage,
+    SessionPatch,
+    now_utc,
+)
 from app.services.ai.deepseek import DeepSeekClient, DeepSeekProviderError
+from app.services.research.card_builder import build_target_card, demo_bundle, infer_scope
+from app.services.research.cache import cache_key, get_bundle as get_cached_bundle, put_bundle as put_cached_bundle
 from app.services.research.connectors import ResearchAggregator, ResearchBundle
 from app.services.scoring.engine import calculate_score
 from app.services.scoring.schemas import (
@@ -22,6 +40,8 @@ from app.services.scoring.schemas import (
     ScoreRequest,
     ScoreResult,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TargetLens API", version="0.1.0", docs_url="/docs")
 configure_logging()
@@ -42,8 +62,347 @@ SESSIONS: dict[str, Session] = {
         status="READY",
         created_at=now_utc(),
         data_cutoff=DATA_CUTOFF,
+        subtitle="三阴性乳腺癌 · 最近更新",
+        updated_at=now_utc(),
+        pinned=True,
+        is_mock=False,
     )
 }
+SESSION_MESSAGES: dict[str, list[SessionMessage]] = {
+    "session-ror1": [
+        SessionMessage(
+            id="message-ror1-seed",
+            session_id="session-ror1",
+            role="user",
+            content="ROR1 在三阴性乳腺癌中是否适合开发 ADC？",
+            created_at=now_utc(),
+            is_mock=False,
+        )
+    ]
+}
+TARGET_CARDS: dict[str, dict[str, Any]] = {}
+RESEARCH_BUNDLES: dict[str, ResearchBundle] = {}
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _session_subtitle(question: str, status: str) -> str:
+    target, disease, _ = infer_scope(question)
+    scope = disease or "待补充适应证"
+    suffix = "实时更新" if status == "READY" else ("检索中" if status == "PROCESSING" else "草稿")
+    return f"{target} · {scope} · {suffix}"
+
+
+def _session_with_defaults(session: Session) -> Session:
+    return session.model_copy(
+        update={
+            "subtitle": session.subtitle or _session_subtitle(session.question, session.status),
+            "updated_at": session.updated_at or session.created_at,
+        }
+    )
+
+
+async def _db_list_sessions() -> list[Session]:
+    if settings.api_mode != "database":
+        return []
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import ResearchSession as DbResearchSession
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            rows = (await db.execute(select(DbResearchSession).order_by(DbResearchSession.updated_at.desc()))).scalars().all()
+            return [
+                Session(
+                    id=str(row.id),
+                    title=row.title,
+                    question=row.question,
+                    status=cast(Literal["READY", "PROCESSING", "DRAFT"], row.status if row.status in {"READY", "PROCESSING", "DRAFT"} else "DRAFT"),
+                    created_at=row.created_at,
+                    data_cutoff=row.data_cutoff,
+                    subtitle=_session_subtitle(row.question, row.status),
+                    updated_at=row.updated_at,
+                    pinned=False,
+                    is_mock=row.mode == "mock",
+                )
+                for row in rows
+            ]
+    except Exception:
+        return []
+
+
+async def _db_create_session(session: Session) -> None:
+    if settings.api_mode != "database" or not _is_uuid(session.id):
+        return
+    try:
+        from app.db.models.core import ResearchSession as DbResearchSession
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            db.add(
+                DbResearchSession(
+                    id=UUID(session.id),
+                    title=session.title,
+                    question=session.question,
+                    status=session.status,
+                    data_cutoff=session.data_cutoff,
+                    mode="live" if not session.is_mock else "mock",
+                    created_at=session.created_at,
+                    updated_at=session.updated_at or session.created_at,
+                )
+            )
+            await db.commit()
+    except Exception:
+        # The API remains usable when the optional database is temporarily down;
+        # the health endpoint exposes that state and the in-memory cache keeps
+        # the active task alive.
+        return
+
+
+async def _db_update_session(session: Session) -> None:
+    if settings.api_mode != "database" or not _is_uuid(session.id):
+        return
+    try:
+        from sqlalchemy import update
+
+        from app.db.models.core import ResearchSession as DbResearchSession
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            await db.execute(
+                update(DbResearchSession)
+                .where(DbResearchSession.id == UUID(session.id))
+                .values(status=session.status, title=session.title, question=session.question, updated_at=session.updated_at or now_utc())
+            )
+            await db.commit()
+    except Exception:
+        return
+
+
+async def _db_delete_session(session_id: str) -> None:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return
+    try:
+        from sqlalchemy import delete
+
+        from app.db.models.core import ResearchSession as DbResearchSession
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            await db.execute(delete(DbResearchSession).where(DbResearchSession.id == UUID(session_id)))
+            await db.commit()
+    except Exception:
+        return
+
+
+async def _db_save_message(message: SessionMessage) -> None:
+    if settings.api_mode != "database" or not _is_uuid(message.session_id):
+        return
+    try:
+        from app.db.models.core import SessionMessage as DbSessionMessage
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            metadata = {"provider": message.provider, "is_mock": message.is_mock}
+            db.add(DbSessionMessage(id=UUID(message.id), session_id=UUID(message.session_id), role=message.role, content=message.content, citations=[metadata]))
+            await db.commit()
+    except Exception:
+        return
+
+
+async def _db_list_messages(session_id: str) -> list[SessionMessage]:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return []
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import SessionMessage as DbSessionMessage
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            rows = (await db.execute(select(DbSessionMessage).where(DbSessionMessage.session_id == UUID(session_id)).order_by(DbSessionMessage.created_at.asc()))).scalars().all()
+            messages: list[SessionMessage] = []
+            for row in rows:
+                if row.role not in {"user", "assistant"}:
+                    continue
+                metadata = (row.citations or [{}])[0] if isinstance(row.citations, list) else {}
+                messages.append(SessionMessage(id=str(row.id), session_id=session_id, role=cast(Literal["user", "assistant"], row.role), content=row.content, created_at=row.created_at, provider=metadata.get("provider"), is_mock=bool(metadata.get("is_mock", False))))
+            return messages
+    except Exception:
+        return []
+
+
+async def _db_save_card(session_id: str, card: dict[str, Any]) -> dict[str, Any]:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return card
+    try:
+        from sqlalchemy import desc, select
+
+        from app.db.models.core import TargetCardVersion
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            latest = (await db.execute(select(TargetCardVersion.version).where(TargetCardVersion.session_id == UUID(session_id)).order_by(desc(TargetCardVersion.version)).limit(1))).scalar_one_or_none()
+            version = int(latest or 0) + 1
+            stored_card = {**card, "version": version}
+            card_id = str(stored_card.get("id", ""))
+            stored_card["id"] = f"{card_id.rsplit('-v', 1)[0]}-v{version}" if "-v" in card_id else card_id
+            db.add(TargetCardVersion(session_id=UUID(session_id), version=version, status="READY", card=stored_card))
+            await db.commit()
+            return stored_card
+    except Exception:
+        return card
+
+
+async def _db_load_card(session_id: str) -> dict[str, Any] | None:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return None
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import TargetCardVersion
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            row = (await db.execute(select(TargetCardVersion).where(TargetCardVersion.session_id == UUID(session_id)).order_by(TargetCardVersion.version.desc()))).scalars().first()
+            return row.card if row else None
+    except Exception:
+        return None
+
+
+async def _db_save_bundle(session_id: str, bundle: ResearchBundle) -> None:
+    """Persist source snapshots and relation facts for auditability.
+
+    TargetCardVersion keeps the UI fast, while these rows make the same
+    evidence reusable by later scoring, export and knowledge-graph stages.
+    The operation is best-effort so a connector outage cannot erase an already
+    usable card.
+    """
+
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return
+    try:
+        from sqlalchemy import delete, select
+
+        from app.db.models.core import EvidenceItem as DbEvidenceItem
+        from app.db.models.core import RelationFact, SessionContext, SourceRegistry, SourceSnapshot
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            await db.execute(delete(DbEvidenceItem).where(DbEvidenceItem.session_id == UUID(session_id)))
+            await db.execute(delete(RelationFact).where(RelationFact.session_id == UUID(session_id)))
+            for item in bundle.items:
+                registry = (await db.execute(select(SourceRegistry).where(SourceRegistry.canonical_url == item.url))).scalars().first()
+                if registry is None:
+                    registry = SourceRegistry(canonical_url=item.url, title=item.title, source_type=item.source_type, authority_tier="T1" if item.connector in {"uniprot", "open_targets", "clinicaltrials", "chembl"} else "T2")
+                    db.add(registry)
+                    await db.flush()
+                payload = item.model_dump(mode="json")
+                content_hash = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+                snapshot = SourceSnapshot(source_id=registry.id, content_hash=content_hash, payload=payload)
+                db.add(snapshot)
+                await db.flush()
+                confidence = 0.85 if item.connector in {"uniprot", "open_targets", "clinicaltrials", "chembl"} else 0.7
+                db.add(DbEvidenceItem(session_id=UUID(session_id), source_snapshot_id=snapshot.id, evidence_type=item.source_type, claim=item.title, excerpt=item.summary, confidence=confidence, locator=item.metadata))
+            for relation in bundle.graph_relations:
+                db.add(RelationFact(session_id=UUID(session_id), subject=relation.source, predicate=relation.predicate, object=relation.target, evidence_ids=relation.evidence_ids))
+            context = (await db.execute(select(SessionContext).where(SessionContext.session_id == UUID(session_id)))).scalars().first()
+            connector_statuses = [{"connector": result.connector, "status": result.status, "error": result.error} for result in bundle.connectors]
+            if context is None:
+                db.add(SessionContext(session_id=UUID(session_id), context={"connector_statuses": connector_statuses}))
+            else:
+                context.context = {**(context.context or {}), "connector_statuses": connector_statuses}
+            await db.commit()
+    except Exception as exc:
+        logger.warning("source_bundle_persist_failed", extra={"session_id": session_id, "error": str(exc)[:240]})
+        return
+
+
+async def _db_load_bundle(session_id: str, question: str) -> ResearchBundle | None:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return None
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import EvidenceItem as DbEvidenceItem
+        from app.db.models.core import RelationFact, SessionContext, SourceRegistry, SourceSnapshot
+        from app.services.research.connectors import ConnectorResult, EvidenceHit, GraphNode, GraphRelation
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            rows = (await db.execute(select(DbEvidenceItem, SourceSnapshot, SourceRegistry).join(SourceSnapshot, DbEvidenceItem.source_snapshot_id == SourceSnapshot.id).join(SourceRegistry, SourceSnapshot.source_id == SourceRegistry.id).where(DbEvidenceItem.session_id == UUID(session_id)))).all()
+            relations = (await db.execute(select(RelationFact).where(RelationFact.session_id == UUID(session_id)))).scalars().all()
+            context = (await db.execute(select(SessionContext).where(SessionContext.session_id == UUID(session_id)))).scalars().first()
+            if not rows:
+                return None
+            hits: list[EvidenceHit] = []
+            by_connector: dict[str, list[EvidenceHit]] = {}
+            for _, snapshot, registry in rows:
+                payload = snapshot.payload or {}
+                try:
+                    hit = EvidenceHit.model_validate(payload)
+                except ValueError:
+                    continue
+                hits.append(hit)
+                by_connector.setdefault(hit.connector, []).append(hit)
+            target, disease, modality = infer_scope(question)
+            target_node = f"target:{target.lower().replace(' ', '-')}"
+            graph_nodes = [GraphNode(id=target_node, label=target, type="target")]
+            if disease:
+                disease_node = f"disease:{disease.lower().replace(' ', '-')}"
+                graph_nodes.append(GraphNode(id=disease_node, label=disease, type="disease"))
+            graph_relations = [GraphRelation(source=row.subject, predicate=row.predicate, target=row.object, evidence_ids=row.evidence_ids or []) for row in relations]
+            for hit in hits:
+                node_id = f"source:{hit.id}"
+                graph_nodes.append(GraphNode(id=node_id, label=hit.title, type=hit.source_type))
+            saved_statuses: dict[str, dict[str, Any]] = {}
+            for item in ((context.context or {}).get("connector_statuses", []) if context else []):
+                if isinstance(item, dict) and isinstance(item.get("connector"), str):
+                    saved_statuses[item["connector"]] = item
+            connector_names = list(dict.fromkeys([*saved_statuses.keys(), *by_connector.keys()]))
+            connectors = [ConnectorResult(connector=name, status=saved_statuses.get(name, {}).get("status", "READY"), items=by_connector.get(name, []), error=saved_statuses.get(name, {}).get("error")) for name in connector_names]
+            return ResearchBundle(target=target, disease=disease, modality=modality, connectors=connectors, items=hits, graph_nodes=graph_nodes, graph_relations=graph_relations)
+    except Exception:
+        return None
+
+
+async def _fetch_research_bundle(
+    target: str,
+    disease: str | None,
+    modality: str | None,
+    *,
+    force_refresh: bool = False,
+    official_only: bool = False,
+) -> ResearchBundle:
+    """Fetch a normalized bundle, reusing Redis without hiding outages."""
+
+    key = cache_key(target, disease, modality, official_only)
+    if not force_refresh:
+        cached = await get_cached_bundle(key)
+        if cached is not None:
+            return cached
+
+    bundle = await ResearchAggregator().search(target, disease, modality)
+    if official_only:
+        official_connectors = {"uniprot", "open_targets", "clinicaltrials", "chembl"}
+        connectors = [result for result in bundle.connectors if result.connector in official_connectors]
+        items = [item for result in connectors for item in result.items]
+        item_ids = {item.id for item in items}
+        graph_nodes = [node for node in bundle.graph_nodes if node.type in {"target", "disease"} or node.id.removeprefix("source:") in item_ids]
+        graph_relations = [relation for relation in bundle.graph_relations if not relation.evidence_ids or any(evidence_id in item_ids for evidence_id in relation.evidence_ids)]
+        bundle = bundle.model_copy(update={"connectors": connectors, "items": items, "graph_nodes": graph_nodes, "graph_relations": graph_relations})
+    # Do not retain an all-degraded response.  A partial bundle remains useful
+    # and will be replaced on the next explicit refresh after the TTL expires.
+    if bundle.items or not any(result.status == "DEGRADED" for result in bundle.connectors):
+        await put_cached_bundle(key, bundle)
+    return bundle
 
 
 async def database_status() -> DatabaseStatus:
@@ -82,47 +441,113 @@ async def ai_status() -> dict[str, object]:
 async def research_preview(payload: ResearchPreviewRequest) -> ResearchBundle:
     """Fetch a normalized, traceable preview from public research connectors."""
 
-    return await ResearchAggregator().search(payload.target, payload.disease, payload.modality)
+    return await _fetch_research_bundle(payload.target, payload.disease, payload.modality)
 
 
 @app.get("/api/v1/sessions", response_model=list[Session])
 async def list_sessions() -> list[Session]:
-    return list(SESSIONS.values())
+    db_sessions = await _db_list_sessions()
+    merged = {session.id: _session_with_defaults(session) for session in SESSIONS.values()}
+    merged.update({session.id: _session_with_defaults(session) for session in db_sessions})
+    return list(merged.values())
 
 
 @app.post("/api/v1/sessions", response_model=Session, status_code=status.HTTP_201_CREATED)
 async def create_session(payload: SessionCreate) -> Session:
-    session_id = f"session-{uuid4().hex[:8]}"
+    session_id = str(uuid4()) if settings.api_mode == "database" else f"session-{uuid4().hex[:8]}"
+    target, disease, _ = infer_scope(payload.question)
     session = Session(
         id=session_id,
-        title=payload.question[:32],
+        title=f"{target} · {disease or '新建研读'}"[:48],
         question=payload.question,
         status="DRAFT",
         created_at=now_utc(),
         data_cutoff=DATA_CUTOFF,
+        subtitle=_session_subtitle(payload.question, "DRAFT"),
+        updated_at=now_utc(),
+        is_mock=False,
     )
     SESSIONS[session_id] = session
-    return session
+    SESSION_MESSAGES[session_id] = []
+    await _db_create_session(session)
+    return _session_with_defaults(session)
 
 
 @app.get("/api/v1/sessions/{session_id}", response_model=Session)
 async def get_session(session_id: str) -> Session:
     session = SESSIONS.get(session_id)
+    if session is not None:
+        return _session_with_defaults(session)
+    db_sessions = await _db_list_sessions()
+    session = next((item for item in db_sessions if item.id == session_id), None)
     if session is None:
         raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
-    return session
+    SESSIONS[session_id] = session
+    return _session_with_defaults(session)
+
+
+@app.patch("/api/v1/sessions/{session_id}", response_model=Session)
+async def patch_session(session_id: str, payload: SessionPatch) -> Session:
+    session = await get_session(session_id)
+    updates: dict[str, Any] = {"updated_at": now_utc()}
+    if payload.title is not None:
+        updates["title"] = payload.title.strip()
+    if payload.pinned is not None:
+        updates["pinned"] = payload.pinned
+    updated = session.model_copy(update=updates)
+    SESSIONS[session_id] = updated
+    await _db_update_session(updated)
+    return _session_with_defaults(updated)
+
+
+@app.delete("/api/v1/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(session_id: str) -> None:
+    await get_session(session_id)
+    SESSIONS.pop(session_id, None)
+    SESSION_MESSAGES.pop(session_id, None)
+    TARGET_CARDS.pop(session_id, None)
+    RESEARCH_BUNDLES.pop(session_id, None)
+    await _db_delete_session(session_id)
 
 
 @app.post("/api/v1/sessions/{session_id}/research", response_model=ResearchJob, status_code=status.HTTP_202_ACCEPTED)
-async def start_research(session_id: str) -> ResearchJob:
-    session = SESSIONS.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
-    SESSIONS[session_id] = session.model_copy(update={"status": "PROCESSING"})
-    return ResearchJob(job_id=f"job-{uuid4().hex[:8]}", status="QUEUED", events_url=f"/api/v1/sessions/{session_id}/events")
+async def start_research(session_id: str, payload: ResearchStart | None = None) -> ResearchJob:
+    session = await get_session(session_id)
+    question = (payload.question if payload else None) or session.question
+    session = session.model_copy(update={"question": question, "status": "PROCESSING", "subtitle": _session_subtitle(question, "PROCESSING"), "updated_at": now_utc()})
+    SESSIONS[session_id] = session
+    await _db_update_session(session)
+
+    target, disease, modality = infer_scope(question)
+    # Tests and an explicitly disabled AI environment stay offline.  The real
+    # desktop configuration has AI_ENABLED=true, so it always uses public
+    # connectors and never silently falls back to the ROR1 demo card.
+    use_live_connectors = settings.ai_enabled or settings.api_mode == "database"
+    if use_live_connectors:
+        bundle = await _fetch_research_bundle(
+            target,
+            disease,
+            modality,
+            force_refresh=bool(payload and payload.force_refresh),
+            official_only=bool(payload and payload.official_only),
+        )
+    else:
+        bundle = demo_bundle(target, disease, modality)
+    card = build_target_card(session_id, question, bundle, DATA_CUTOFF, is_mock=not use_live_connectors)
+    card = await _db_save_card(session_id, card)
+    TARGET_CARDS[session_id] = card
+    RESEARCH_BUNDLES[session_id] = bundle
+    ready_session = session.model_copy(update={"status": "READY", "subtitle": _session_subtitle(question, "READY"), "updated_at": now_utc(), "is_mock": not use_live_connectors})
+    SESSIONS[session_id] = ready_session
+    await _db_update_session(ready_session)
+    await _db_save_bundle(session_id, bundle)
+    # Keep the queued contract for offline/test mode; the card is already
+    # available in the cache, so the client can fetch it immediately.  Live
+    # connector runs report READY after their normalized bundle is persisted.
+    return ResearchJob(job_id=f"job-{uuid4().hex[:8]}", status="READY" if use_live_connectors else "QUEUED", events_url=f"/api/v1/sessions/{session_id}/events")
 
 
-async def research_events() -> AsyncIterator[str]:
+async def research_events(session_id: str, last_event_id: int = 0) -> AsyncIterator[str]:
     events = [
         ("research.progress", {"stage": "RESOLVING_ENTITY", "progress": 10}),
         ("research.progress", {"stage": "FETCHING_STRUCTURED_DATA", "progress": 35}),
@@ -130,25 +555,134 @@ async def research_events() -> AsyncIterator[str]:
         ("research.progress", {"stage": "BUILDING_GRAPH", "progress": 78}),
         ("research.section_ready", {"section": "biology"}),
         ("research.section_ready", {"section": "risks"}),
-        ("research.completed", {"target_card_version": 1}),
     ]
+    session = await get_session(session_id)
+    bundle = RESEARCH_BUNDLES.get(session_id) or await _db_load_bundle(session_id, session.question)
+    if bundle:
+        events.extend(("research.partial_failure", {"source": result.connector, "retryable": True, "error": result.error or "connector degraded"}) for result in bundle.connectors if result.status == "DEGRADED")
+    card = TARGET_CARDS.get(session_id) or await _db_load_card(session_id)
+    events.append(("research.completed", {"target_card_version": int(card.get("version", 1)) if card else 1, "session_id": session_id}))
     for index, (event_name, payload) in enumerate(events, start=1):
+        if index <= last_event_id:
+            continue
         await asyncio.sleep(0.08)
         yield f"id: {index}\nevent: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @app.get("/api/v1/sessions/{session_id}/events")
-async def events(session_id: str) -> StreamingResponse:
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
-    return StreamingResponse(research_events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+async def events(session_id: str, last_event_id: str | None = Header(default=None, alias="Last-Event-ID")) -> StreamingResponse:
+    await get_session(session_id)
+    try:
+        cursor = max(int(last_event_id or "0"), 0)
+    except ValueError:
+        cursor = 0
+    return StreamingResponse(research_events(session_id, cursor), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/v1/sessions/{session_id}/target-card")
-async def target_card(session_id: str) -> dict[str, object]:
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
-    return {"id": "card-ror1-v1", "session_id": session_id, "version": 1, "metadata": {"isMock": True, "generatedForDemo": True, "dataCutoff": DATA_CUTOFF}}
+async def target_card(session_id: str) -> dict[str, Any]:
+    session = await get_session(session_id)
+    card = TARGET_CARDS.get(session_id) or await _db_load_card(session_id)
+    if card is None:
+        target, disease, modality = infer_scope(session.question)
+        use_live_connectors = settings.ai_enabled or settings.api_mode == "database"
+        bundle = await _fetch_research_bundle(target, disease, modality) if use_live_connectors else demo_bundle(target, disease, modality)
+        card = build_target_card(session_id, session.question, bundle, DATA_CUTOFF, is_mock=not use_live_connectors)
+        card = await _db_save_card(session_id, card)
+        TARGET_CARDS[session_id] = card
+        RESEARCH_BUNDLES[session_id] = bundle
+        await _db_save_bundle(session_id, bundle)
+    return card
+
+
+@app.post("/api/v1/sessions/{session_id}/target-card/refresh")
+async def refresh_target_card(session_id: str, payload: ResearchStart | None = None) -> dict[str, object]:
+    """Refresh the current session without creating a second record."""
+
+    await start_research(session_id, payload)
+    return await target_card(session_id)
+
+
+@app.get("/api/v1/evidence/{evidence_id}")
+async def get_evidence(evidence_id: str) -> dict[str, Any]:
+    for card in TARGET_CARDS.values():
+        evidence = next((item for item in card.get("validation", []) if item.get("id") == evidence_id), None)
+        if evidence is not None:
+            return evidence
+    if settings.api_mode == "database":
+        try:
+            from sqlalchemy import select
+
+            from app.db.models.core import EvidenceItem as DbEvidenceItem
+            from app.db.models.core import SourceRegistry, SourceSnapshot
+            from app.db.session import SessionFactory
+
+            async with SessionFactory() as db:
+                row = (await db.execute(select(DbEvidenceItem, SourceSnapshot, SourceRegistry).join(SourceSnapshot, DbEvidenceItem.source_snapshot_id == SourceSnapshot.id).join(SourceRegistry, SourceSnapshot.source_id == SourceRegistry.id))).all()
+                for evidence_item, snapshot, _ in row:
+                    payload = snapshot.payload or {}
+                    if payload.get("id") == evidence_id:
+                        session = await get_session(str(evidence_item.session_id))
+                        bundle = RESEARCH_BUNDLES.get(session.id) or await _db_load_bundle(session.id, session.question)
+                        if bundle is not None:
+                            card = build_target_card(session.id, session.question, bundle, DATA_CUTOFF, is_mock=session.is_mock)
+                            evidence = next((item for item in card.get("validation", []) if item.get("id") == evidence_id), None)
+                            if evidence is not None:
+                                return evidence
+                        return _evidence_from_hit_payload(payload)
+        except Exception:
+            pass
+    raise HTTPException(status_code=404, detail="EVIDENCE_NOT_FOUND")
+
+
+def _evidence_from_hit_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep evidence returned by the DB compatible with the frontend card."""
+
+    return payload
+
+
+@app.get("/api/v1/sessions/{session_id}/evidence")
+async def session_evidence(session_id: str) -> list[dict[str, Any]]:
+    card = await target_card(session_id)
+    return list(card.get("validation", []))
+
+
+@app.get("/api/v1/sessions/{session_id}/graph")
+async def session_graph(session_id: str) -> dict[str, Any]:
+    card = await target_card(session_id)
+    return dict(card.get("graph", {"nodes": [], "edges": []}))
+
+
+@app.get("/api/v1/sessions/{session_id}/risks")
+async def session_risks(session_id: str) -> list[dict[str, Any]]:
+    card = await target_card(session_id)
+    return list(card.get("risks", []))
+
+
+@app.get("/api/v1/sessions/{session_id}/landscape")
+async def session_landscape(session_id: str) -> dict[str, Any]:
+    card = await target_card(session_id)
+    return {"competition": card.get("competition", {}), "drugs": card.get("drugs", []), "trials": card.get("trials", [])}
+
+
+@app.get("/api/v1/sessions/{session_id}/research-bundle", response_model=ResearchBundle)
+async def session_research_bundle(session_id: str) -> ResearchBundle:
+    session = await get_session(session_id)
+    bundle = RESEARCH_BUNDLES.get(session_id)
+    if bundle is not None:
+        return bundle
+    bundle = await _db_load_bundle(session_id, session.question)
+    if bundle is not None:
+        RESEARCH_BUNDLES[session_id] = bundle
+        return bundle
+    card = TARGET_CARDS.get(session_id) or await _db_load_card(session_id)
+    if card is None:
+        await target_card(session_id)
+    bundle = RESEARCH_BUNDLES.get(session_id)
+    if bundle is None:
+        target, disease, modality = infer_scope(session.question)
+        bundle = demo_bundle(target, disease, modality)
+    return bundle
 
 
 def default_score_request() -> ScoreRequest:
@@ -192,36 +726,206 @@ def default_score_request() -> ScoreRequest:
     )
 
 
+def score_request_for_card(card: dict[str, Any]) -> ScoreRequest:
+    """Derive auditable score inputs from the current target card.
+
+    These are deterministic heuristics for the first live scoring pass.  They
+    never turn an evidence hit into a clinical claim; sparse or degraded cards
+    lower confidence and keep the recommendation capped at ``PILOT``.
+    """
+
+    validation = list(card.get("validation", []))
+    risks = list(card.get("risks", []))
+    trials = list(card.get("trials", []))
+    drugs = list(card.get("drugs", []))
+    metadata = card.get("metadata", {})
+    evidence_count = len(validation)
+    real_evidence = sum(item.get("source", {}).get("tier") in {"T0", "T1"} for item in validation)
+    degraded = "降级" in str(card.get("metrics", {}).get("riskStatus", "")) or "degraded" in str(card.get("executiveSummary", "")).lower()
+    coverage = min(92, 30 + evidence_count * 3)
+    authority = min(95, 45 + real_evidence * 4)
+    consistency = min(88, 48 + min(evidence_count, 10) * 3)
+    freshness = 78 if not metadata.get("isMock") else 45
+    scope_clarity = 72 if card.get("scope", {}).get("disease") not in {None, "未指定适应症"} else 45
+
+    redline_source = (risks[0].get("sourceId") if risks else None) or (validation[0].get("id") if validation else "")
+    redlines = [
+        RedlineInput(
+            id=risks[0].get("id", "evidence-boundary") if risks else "evidence-boundary",
+            name=risks[0].get("title", "关键证据仍需人工复核") if risks else "关键证据仍需人工复核",
+            triggered=True,
+            rationale=risks[0].get("impact", "公开来源不能替代实验、临床或监管判断") if risks else "当前证据不足以直接形成开发结论",
+            evidence_ids=[redline_source] if redline_source else [],
+            mitigable=True,
+            requires_human_review=True,
+            recommendation_cap="PILOT",
+        )
+    ]
+    return ScoreRequest(
+        opportunity=OpportunityDimensions(
+            unmet_need=58,
+            target_validation=min(88, 36 + evidence_count * 3),
+            patient_selection=42 if scope_clarity < 60 else 58,
+            modality_fit=55 if card.get("scope", {}).get("modality") not in {None, "未指定"} and evidence_count else 35,
+            differentiation_space=max(32, 62 - len(drugs) * 5),
+            clinical_feasibility=min(72, 30 + len(trials) * 8),
+            safety_controllability=38,
+        ),
+        risk=RiskDimensions(
+            normal_tissue_window=62,
+            known_safety_class_risk=58,
+            clinical_failure_risk=48 if trials else 64,
+            regulatory_risk=38,
+            scientific_uncertainty=max(38, 78 - evidence_count * 2),
+            competitive_window=min(72, 34 + len(drugs) * 6),
+        ),
+        evidence=EvidenceDimensions(
+            evidence_coverage=coverage,
+            source_authority=authority,
+            cross_source_consistency=consistency,
+            freshness=freshness,
+            scope_clarity=scope_clarity,
+        ),
+        redlines=redlines if degraded or evidence_count < 24 else [],
+    )
+
+
 @app.get("/api/v1/sessions/{session_id}/scores", response_model=ScoreResult)
 async def get_scores(session_id: str) -> ScoreResult:
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
-    return calculate_score(default_score_request())
+    await get_session(session_id)
+    card = await target_card(session_id)
+    return calculate_score(score_request_for_card(card))
 
 
 @app.post("/api/v1/sessions/{session_id}/scores", response_model=ScoreResult)
 async def calculate_session_scores(session_id: str, payload: ScoreRequest) -> ScoreResult:
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
+    await get_session(session_id)
     return calculate_score(payload)
 
 
 @app.post("/api/v1/sessions/{session_id}/messages")
 async def ask(session_id: str, payload: MessageCreate) -> dict[str, object]:
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
+    session = await get_session(session_id)
     question = payload.question.strip()
+    history = SESSION_MESSAGES.get(session_id)
+    if history is None:
+        history = await _db_list_messages(session_id)
+        SESSION_MESSAGES[session_id] = history
+    user_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="user", content=question, created_at=now_utc(), is_mock=False)
+    history.append(user_message)
+    await _db_save_message(user_message)
+
+    card = TARGET_CARDS.get(session_id) or await _db_load_card(session_id)
+    evidence_context = ""
+    if card:
+        evidence = card.get("validation", [])[:6]
+        evidence_context = "\n".join(f"- {item.get('statement', '')}（{item.get('source', {}).get('organization', '')}）" for item in evidence)
+    context_messages = [
+        {"role": "system", "content": (
+            "你是 TargetLens 研究助手。你正在同一个持续会话中工作，必须记住并引用当前会话范围。"
+            f"当前会话问题：{session.question}\n靶点卡证据摘要：{evidence_context or '尚未生成靶点卡'}\n"
+            "只把有证据支持的内容说成事实；无法确认时明确标注未知，不要编造文献、临床试验或监管结论。"
+            "回答要直接回应本轮问题，并说明与上一轮的关系。用简洁的中文回答。"
+        )}
+    ]
+    for item in history[-12:]:
+        context_messages.append({"role": item.role, "content": item.content[-4000:]})
+    provider = "mock"
+    is_mock = True
+    provider_status: str | None = None
     if settings.ai_enabled and settings.deepseek_api_key:
         try:
             client = DeepSeekClient.from_settings(settings)
             answer = await client.complete(
-                [
-                    {"role": "system", "content": "你是 TargetLens 研究助手。只把有证据支持的内容说成事实；无法确认时明确标注未知，不要编造文献、临床试验或监管结论。用简洁的中文回答。"},
-                    {"role": "user", "content": question},
-                ],
+                context_messages,
                 reasoning=payload.reasoning,
             )
-            return {"id": f"answer-{uuid4().hex[:8]}", "status": "READY", "summary": answer, "question": question, "data_cutoff": DATA_CUTOFF, "is_mock": False, "provider": "deepseek"}
+            provider = "deepseek"
+            is_mock = False
+            summary = answer
+            status_value = "READY"
         except DeepSeekProviderError:
-            return {"id": f"answer-{uuid4().hex[:8]}", "status": "DEGRADED", "summary": "DeepSeek 暂时不可用，已回退到演示回答；请稍后重试。", "question": question, "data_cutoff": DATA_CUTOFF, "is_mock": True, "provider": "deepseek", "provider_status": "DEGRADED"}
-    return {"id": f"answer-{uuid4().hex[:8]}", "status": "PARTIAL", "summary": "Mock grounded answer：请结合证据抽屉继续核验。", "question": question, "data_cutoff": DATA_CUTOFF, "is_mock": True}
+            provider = "deepseek"
+            provider_status = "DEGRADED"
+            summary = f"DeepSeek 暂时不可用。围绕“{session.question}”的当前问题“{question}”，请先回到证据来源核验后再作判断。"
+            status_value = "DEGRADED"
+    else:
+        summary = f"当前仍在“{session.question}”这个研究范围内。关于“{question}”，本地模型未启用；请结合靶点卡中的实时来源继续核验。"
+        status_value = "PARTIAL"
+
+    assistant_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="assistant", content=summary, created_at=now_utc(), provider=provider, is_mock=is_mock)
+    history.append(assistant_message)
+    await _db_save_message(assistant_message)
+    updated_session = session.model_copy(update={"updated_at": now_utc(), "subtitle": _session_subtitle(session.question, "READY")})
+    SESSIONS[session_id] = updated_session
+    await _db_update_session(updated_session)
+    return {
+        "id": assistant_message.id,
+        "status": status_value,
+        "summary": summary,
+        "question": question,
+        "data_cutoff": DATA_CUTOFF,
+        "is_mock": is_mock,
+        "provider": provider,
+        "provider_status": provider_status,
+        "context_session_id": session_id,
+        "turn_index": len(history) // 2,
+    }
+
+
+@app.get("/api/v1/sessions/{session_id}/messages", response_model=list[SessionMessage])
+async def list_messages(session_id: str) -> list[SessionMessage]:
+    await get_session(session_id)
+    history = SESSION_MESSAGES.get(session_id)
+    if history is None:
+        history = await _db_list_messages(session_id)
+        SESSION_MESSAGES[session_id] = history
+    return history
+
+
+@app.post("/api/v1/sessions/{session_id}/decision-memos")
+async def generate_decision_memo(session_id: str) -> dict[str, Any]:
+    card = await target_card(session_id)
+    target = card["target"]["symbol"]
+    scope = card["scope"]
+    unknowns = card["conclusions"].get("unknowns", [])
+    memo = {
+        "projectDefinition": f"围绕 {target} 在 {scope['disease']} 中的 {scope['modality']} 研究假设，限定当前公开来源范围。",
+        "whyNow": f"当前卡片已归一化 {len(card.get('validation', []))} 条证据，适合把下一步从泛泛讨论收敛到可验证问题。",
+        "hardParts": ["证据强度与适用范围需要分开阅读", "正常组织窗口和患者分层仍未锁定", *unknowns[:1]],
+        "options": [
+            {"type": "VALIDATE", "title": "补齐关键验证证据", "content": "优先补充与适应证直接相关的机制、分层和安全窗口数据。", "evidenceIds": [item["id"] for item in card.get("validation", [])[:3]], "limitation": "公开来源不能替代实验与临床判断。", "priority": "P0", "cost": "中"},
+            {"type": "COMPARE", "title": "做形式与竞争对照", "content": "把候选药物形式、同靶点项目和差异化终点放在同一张比较表。", "evidenceIds": [item["id"] for item in card.get("validation", [])[3:6]], "limitation": "当前竞争盘点不是完整管线。", "priority": "P1", "cost": "中"},
+        ],
+        "nextValidation": ["复核原始文献和结构化条目", "补充正常组织与患者分层证据", "定义可退出的药效/安全门槛"],
+        "exitCriteria": ["关键证据无法重复", "安全窗口无法形成可测量阈值", "适应证和形式始终无法收敛"],
+        "boundaries": card["conclusions"].get("boundaries", []),
+    }
+    return memo
+
+
+@app.post("/api/v1/sessions/{session_id}/reports")
+async def create_report(session_id: str, payload: ReportCreate | None = None) -> dict[str, Any]:
+    card = await target_card(session_id)
+    memo = await generate_decision_memo(session_id)
+    lines = [
+        f"# {card['target']['symbol']} 靶点研读报告",
+        "",
+        f"> {card['metadata']['disclaimer']}",
+        "",
+        f"- 研究范围：{card['scope']['disease']} · {card['scope']['modality']}",
+        f"- 数据截至：{card['metadata']['dataCutoff']}",
+        "",
+        "## 结论",
+        "",
+        card["conclusions"]["verdict"],
+        "",
+        "## 证据",
+        "",
+        *[f"- [{item['level']}] {item['statement']}（{item['source']['organization']}）" for item in card.get("validation", [])],
+        "",
+        "## 下一步",
+        "",
+        *[f"- {item}" for item in memo["nextValidation"]],
+    ]
+    return {"filename": f"targetlens-{card['target']['symbol'].lower()}-research-report.md", "format": payload.format if payload else "markdown", "content": "\n".join(lines)}

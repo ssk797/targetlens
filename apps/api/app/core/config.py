@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     web_origin: str = Field(default="http://localhost:3000", validation_alias="WEB_ORIGIN")
     cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000", validation_alias="CORS_ORIGINS")
     data_cutoff: str | None = Field(default=None, validation_alias="DATA_CUTOFF")
+    research_cache_ttl_seconds: int = Field(default=900, validation_alias="RESEARCH_CACHE_TTL_SECONDS")
     ai_enabled: bool = Field(default=False, validation_alias="AI_ENABLED")
     deepseek_api_key: SecretStr | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com", validation_alias="DEEPSEEK_BASE_URL")

@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, ArrowDownRight, ArrowUpRight, BarChart3, ChevronDown, CircleDot, ExternalLink, FlaskConical, GitBranch, Info, ShieldAlert, UsersRound } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, ChevronDown, CircleDot, ExternalLink, FlaskConical, GitBranch, Info, ShieldAlert } from "lucide-react";
 import type { EvidenceItem, TargetCard as TargetCardData } from "@/lib/types/domain";
 import { EvidenceBadge, SourceTierBadge } from "@/components/ui/evidence-badge";
 import { StatusPill } from "@/components/ui/status-pill";
@@ -9,10 +9,18 @@ interface TargetCardProps {
   card: TargetCardData;
   onEvidence: (evidence: EvidenceItem) => void;
   onExport: () => void;
+  onRefresh?: () => void;
+  officialOnly?: boolean;
+  onToggleOfficial?: () => void;
 }
 
-export function TargetCard({ card, onEvidence, onExport }: TargetCardProps) {
+export function TargetCard({ card, onEvidence, onExport, onRefresh, officialOnly = false, onToggleOfficial }: TargetCardProps) {
   const evidenceById = new Map(card.validation.map((item) => [item.id, item]));
+  const firstEvidence = card.validation[0];
+  const lastEvidence = card.validation[card.validation.length - 1];
+  const openFirstEvidence = () => { if (firstEvidence) onEvidence(firstEvidence); };
+  const openLastEvidence = () => { if (lastEvidence) onEvidence(lastEvidence); };
+  const statusTone = card.metadata.isMock ? "amber" : "green";
 
   return (
     <article className="target-card">
@@ -20,12 +28,12 @@ export function TargetCard({ card, onEvidence, onExport }: TargetCardProps) {
         <div className="target-card-title-row">
           <div className="target-symbol">{card.target.symbol.slice(0, 2)}</div>
           <div>
-            <div className="target-title-line"><h2>{card.target.symbol}</h2><StatusPill tone="amber" dot>演示数据</StatusPill><span className="version-label">卡片 V{card.version}</span></div>
+            <div className="target-title-line"><h2>{card.target.symbol}</h2><StatusPill tone={statusTone} dot>{card.metadata.isMock ? "离线缓存" : "实时来源"}</StatusPill><span className="version-label">卡片 V{card.version}</span></div>
             <p className="target-full-name">{card.target.name}</p>
             <p className="scope-line">当前范围：<strong>{card.scope.disease}</strong><span>·</span><strong>{card.scope.modality}</strong><span>·</span>{card.metadata.dataCutoff} 数据截至</p>
           </div>
         </div>
-        <div className="target-header-actions"><button className="header-action"><ArrowDownRight size={15} />刷新</button><button className="header-action"><ShieldAlert size={15} />仅官方</button><button className="header-action" onClick={onExport}><ExternalLink size={15} />导出</button><button className="icon-button" aria-label="更多操作"><Info size={16} /></button></div>
+      <div className="target-header-actions"><button className="header-action" onClick={onRefresh}><ArrowDownRight size={15} />刷新</button><button className={`header-action ${officialOnly ? "header-action-active" : ""}`} onClick={onToggleOfficial} aria-pressed={officialOnly}><ShieldAlert size={15} />{officialOnly ? "仅官方 · 开" : "仅官方"}</button><button className="header-action" onClick={onExport}><ExternalLink size={15} />导出</button><button className="icon-button" aria-label="更多操作"><Info size={16} /></button></div>
       </header>
 
       <div className="metrics-strip">
@@ -40,49 +48,49 @@ export function TargetCard({ card, onEvidence, onExport }: TargetCardProps) {
       <div className="target-card-body">
         <section className="executive-summary">
           <div className="summary-marker"><CircleDot size={18} /></div>
-          <div><p className="eyebrow">Executive readout</p><h3>先验证窗口，再谈推进</h3><p>{card.executiveSummary}</p></div>
-          <StatusPill tone="amber">条件性推进</StatusPill>
+          <div><p className="eyebrow">Executive readout</p><h3>{card.conclusions.verdict.split("。")[0]}</h3><p>{card.executiveSummary}</p></div>
+          <StatusPill tone={card.metadata.isMock ? "amber" : "blue"}>{card.metadata.isMock ? "离线复核" : "待人工复核"}</StatusPill>
         </section>
 
         <div className="target-sections">
-          <EvidenceSection number="01" title="生物学功能" summary={card.biology.summary} evidenceCount={2} onEvidence={() => onEvidence(card.validation[0])}>
+          <EvidenceSection number="01" title="生物学功能" summary={card.biology.summary} evidenceCount={Math.min(2, card.validation.length)} onEvidence={openFirstEvidence}>
             <div className="mechanism-chain" aria-label="机制链">
               {card.biology.mechanism.map((item, index) => <div className="mechanism-node" key={item}><span>{String(index + 1).padStart(2, "0")}</span><strong>{item}</strong>{index < card.biology.mechanism.length - 1 ? <ArrowRightSmall /> : null}</div>)}
             </div>
-            <div className="split-content"><div><p className="mini-label">核心功能</p><ul className="compact-list">{card.biology.functions.map((item) => <li key={item}>{item}</li>)}</ul></div><div><p className="mini-label">争议与边界</p><ul className="compact-list muted-list">{card.biology.disputes.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
+            <div className="split-content"><div><p className="mini-label">核心功能</p><ul className="compact-list">{card.biology.functions.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div><div><p className="mini-label">争议与边界</p><ul className="compact-list muted-list">{card.biology.disputes.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div></div>
           </EvidenceSection>
 
-          <EvidenceSection number="02" title="表达与人群" summary={card.expression.summary} evidenceCount={2} onEvidence={() => onEvidence(card.validation[1])}>
+          <EvidenceSection number="02" title="表达与人群" summary={card.expression.summary} evidenceCount={Math.min(2, card.validation.length)} onEvidence={openFirstEvidence}>
             <div className="expression-grid">{card.expression.tumorSignals.map((signal) => <div className="expression-row" key={signal.label}><span className="expression-name">{signal.label}</span><span className={`level-bar level-${signal.level === "高" ? "high" : signal.level === "中" ? "medium" : signal.level === "低" ? "low" : "unknown"}`}><i /></span><strong>{signal.level}</strong><small>{signal.note}</small></div>)}</div>
             <div className="split-content"><div><p className="mini-label">正常组织暴露</p><ul className="compact-list">{card.expression.normalTissue.map((item) => <li key={item}>{item}</li>)}</ul></div><div><p className="mini-label">患者亚群提示</p><ul className="compact-list">{card.expression.population.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
           </EvidenceSection>
 
-          <EvidenceSection number="03" title="靶点验证" summary="证据支持研究假设，但证据强度和适用范围需要分开阅读。" evidenceCount={card.validation.length} onEvidence={() => onEvidence(card.validation[2])}>
-            <div className="table-wrap"><table className="evidence-table"><caption className="sr-only">ROR1 靶点验证证据矩阵</caption><thead><tr><th>等级</th><th>结论</th><th>方向</th><th>研究类型</th><th>来源</th><th>状态</th></tr></thead><tbody>{card.validation.slice(0, 5).map((item) => <tr key={item.id} onClick={() => onEvidence(item)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onEvidence(item); }}><td><EvidenceBadge level={item.level} /></td><td className="evidence-statement">{item.statement}</td><td><span className={`polarity polarity-${item.polarity.toLowerCase()}`}>{item.polarity === "SUPPORTS" ? "支持" : item.polarity === "CONTRADICTS" ? "限制" : "中性"}</span></td><td>{item.studyType}</td><td><SourceTierBadge tier={item.source.tier} /></td><td>{item.reviewStatus === "REVIEWED" ? "已复核" : "待复核"}</td></tr>)}</tbody></table></div>
+          <EvidenceSection number="03" title="靶点验证" summary="证据支持研究假设，但证据强度和适用范围需要分开阅读。" evidenceCount={card.validation.length} onEvidence={openFirstEvidence}>
+            <div className="table-wrap"><table className="evidence-table"><caption className="sr-only">{card.target.symbol} 靶点验证证据矩阵</caption><thead><tr><th>等级</th><th>结论</th><th>方向</th><th>研究类型</th><th>来源</th><th>状态</th></tr></thead><tbody>{card.validation.slice(0, 5).map((item) => <tr key={item.id} onClick={() => onEvidence(item)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onEvidence(item); }}><td><EvidenceBadge level={item.level} /></td><td className="evidence-statement">{item.statement}</td><td><span className={`polarity polarity-${item.polarity.toLowerCase()}`}>{item.polarity === "SUPPORTS" ? "支持" : item.polarity === "CONTRADICTS" ? "限制" : "中性"}</span></td><td>{item.studyType}</td><td><SourceTierBadge tier={item.source.tier} /></td><td>{item.reviewStatus === "REVIEWED" ? "已复核" : "待复核"}</td></tr>)}</tbody></table></div>
           </EvidenceSection>
 
-          <EvidenceSection number="04" title="成药逻辑" summary="ADC 是当前最值得验证的形式，但不是自动成立的开发答案。" evidenceCount={2} onEvidence={() => onEvidence(card.validation[2])}>
+          <EvidenceSection number="04" title="成药逻辑" summary={`${card.scope.modality} 的形式适配需要独立验证，不能把靶点关联自动当成开发答案。`} evidenceCount={Math.min(2, card.validation.length)} onEvidence={openFirstEvidence}>
             <div className="table-wrap"><table className="modality-table"><caption className="sr-only">药物形式比较</caption><thead><tr><th>形式</th><th>适配</th><th>支持证据</th><th>主要限制</th><th>必须验证</th></tr></thead><tbody>{card.druggability.map((item) => <tr key={item.modality}><td><strong>{item.modality}</strong></td><td><span className={`fit-label fit-${item.fit.toLowerCase()}`}>{item.fit}</span></td><td>{item.evidence}</td><td>{item.limitation}</td><td>{item.verify}</td></tr>)}</tbody></table></div>
           </EvidenceSection>
 
-          <EvidenceSection number="05" title="代表药物与临床" summary="登记信息用于确认项目和阶段，不能单独替代疗效判断。" evidenceCount={2} onEvidence={() => onEvidence(card.validation[3])}>
+          <EvidenceSection number="05" title="代表药物与临床" summary="登记信息用于确认项目和阶段，不能单独替代疗效判断。" evidenceCount={Math.min(card.drugs.length + card.trials.length, card.validation.length)} onEvidence={openFirstEvidence}>
             <div className="program-grid">{card.drugs.map((drug) => <div className="program-row" key={drug.name}><div className="program-icon"><FlaskConical size={17} /></div><div className="program-main"><strong>{drug.name}</strong><span>{drug.sponsor} · {drug.modality}</span></div><span className="program-stage">{drug.stage}</span><span className="program-status">{drug.status}</span></div>)}</div>
-            <div className="trial-strip">{card.trials.map((trial) => <button key={trial.identifier} className="trial-chip" onClick={() => onEvidence(evidenceById.get("ev-clinical-01") ?? card.validation[3])}><span>{trial.identifier}</span><small>{trial.phase} · {trial.status}</small><ExternalLink size={13} /></button>)}</div>
+            <div className="trial-strip">{card.trials.map((trial) => <button key={trial.identifier} className="trial-chip" onClick={() => { const evidence = evidenceById.get(trial.sourceId) ?? firstEvidence; if (evidence) onEvidence(evidence); }}><span>{trial.identifier}</span><small>{trial.phase} · {trial.status}</small><ExternalLink size={13} /></button>)}</div>
           </EvidenceSection>
 
-          <EvidenceSection number="06" title="竞争空间" summary={card.competition.summary} evidenceCount={1} onEvidence={() => onEvidence(card.validation[4])}>
+          <EvidenceSection number="06" title="竞争空间" summary={card.competition.summary} evidenceCount={Math.min(1, card.validation.length)} onEvidence={openFirstEvidence}>
             <div className="competition-layout"><div className="competition-signals">{card.competition.signals.map((signal, index) => <div className="competition-signal" key={signal}><span>0{index + 1}</span><strong>{signal}</strong><ArrowUpRight size={15} /></div>)}</div><div className="whitespace-note"><p className="mini-label">可探索空白</p><p>{card.competition.whitespace}</p></div></div>
           </EvidenceSection>
 
-          <EvidenceSection number="07" title="风险审查" summary="风险红线单独展示，优先于总分，不把行业新闻直接当监管结论。" evidenceCount={card.risks.length} onEvidence={() => onEvidence(card.validation[5])}>
-            <div className="risk-list">{card.risks.map((risk) => <button className="risk-row" key={risk.id} onClick={() => onEvidence(evidenceById.get(risk.sourceId) ?? card.validation[5])}><span className={`risk-severity risk-${risk.severity.toLowerCase()}`}>{risk.severity}</span><span className="risk-type">{risk.type}</span><span className="risk-main"><strong>{risk.title}</strong><small>{risk.fact}</small></span><span className="risk-impact">{risk.impact}</span><ArrowUpRight size={15} /></button>)}</div>
+          <EvidenceSection number="07" title="风险审查" summary="风险红线单独展示，优先于总分，不把行业新闻直接当监管结论。" evidenceCount={card.risks.length} onEvidence={openLastEvidence}>
+            <div className="risk-list">{card.risks.map((risk) => <button className="risk-row" key={risk.id} onClick={() => { const evidence = evidenceById.get(risk.sourceId) ?? lastEvidence; if (evidence) onEvidence(evidence); }}><span className={`risk-severity risk-${risk.severity.toLowerCase()}`}>{risk.severity}</span><span className="risk-type">{risk.type}</span><span className="risk-main"><strong>{risk.title}</strong><small>{risk.fact}</small></span><span className="risk-impact">{risk.impact}</span><ArrowUpRight size={15} /></button>)}</div>
           </EvidenceSection>
 
-          <EvidenceSection number="08" title="知识关系" summary="默认展示 1–2 跳关系；点击节点或边可以回到证据来源。" evidenceCount={4} onEvidence={() => onEvidence(card.validation[0])}>
-            <div className="graph-board"><div className="graph-caption"><span><GitBranch size={15} />关系图谱 · 演示</span><span>节点 5 · 关系 4</span></div><div className="graph-canvas">{card.graph.nodes.map((node, index) => <button key={node.id} className={`graph-node graph-node-${index + 1}`} onClick={() => onEvidence(card.validation[index % card.validation.length])}><span>{node.type}</span><strong>{node.label}</strong></button>)}<div className="graph-line line-1" /><div className="graph-line line-2" /><div className="graph-line line-3" /><div className="graph-line line-4" /></div><div className="graph-legend"><span><i className="legend-dot legend-target" />靶点</span><span><i className="legend-dot legend-disease" />疾病</span><span><i className="legend-dot legend-modality" />药物形式</span><span><i className="legend-dot legend-risk" />风险</span></div></div>
+          <EvidenceSection number="08" title="知识关系" summary="默认展示 1–2 跳关系；点击节点或边可以回到证据来源。" evidenceCount={card.graph.edges.length} onEvidence={openFirstEvidence}>
+            <div className="graph-board"><div className="graph-caption"><span><GitBranch size={15} />关系图谱 · 当前检索</span><span>节点 {card.graph.nodes.length} · 关系 {card.graph.edges.length}</span></div><div className="graph-canvas">{card.graph.nodes.map((node, index) => <button key={node.id} className={`graph-node graph-node-${index + 1}`} onClick={() => { const evidence = card.validation[index % Math.max(card.validation.length, 1)]; if (evidence) onEvidence(evidence); }}><span>{node.type}</span><strong>{node.label}</strong></button>)}<div className="graph-line line-1" /><div className="graph-line line-2" /><div className="graph-line line-3" /><div className="graph-line line-4" /></div><div className="graph-legend"><span><i className="legend-dot legend-target" />靶点</span><span><i className="legend-dot legend-disease" />疾病</span><span><i className="legend-dot legend-modality" />药物形式</span><span><i className="legend-dot legend-risk" />风险</span></div></div>
           </EvidenceSection>
 
-          <EvidenceSection number="09" title="结论与未知项" summary={card.conclusions.verdict} evidenceCount={card.conclusions.unknowns.length} onEvidence={() => onEvidence(card.validation[5])}>
+          <EvidenceSection number="09" title="结论与未知项" summary={card.conclusions.verdict} evidenceCount={card.conclusions.unknowns.length} onEvidence={openLastEvidence}>
             <div className="conclusion-grid"><div className="conclusion-verdict"><span className="verdict-arrow"><ArrowUpRight size={16} /></span><p>{card.conclusions.verdict}</p></div><div><p className="mini-label">结论边界</p><ul className="compact-list muted-list">{card.conclusions.boundaries.map((item) => <li key={item}>{item}</li>)}</ul></div><div><p className="mini-label">待回答问题</p><ul className="compact-list">{card.conclusions.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
           </EvidenceSection>
         </div>

@@ -23,6 +23,14 @@ class ResearchPreviewRequest(BaseModel):
     modality: str | None = Field(default=None, max_length=100)
 
 
+class ResearchStart(BaseModel):
+    """Optional override used when starting a freshly-created session."""
+
+    question: str | None = Field(default=None, min_length=1, max_length=4000)
+    official_only: bool = False
+    force_refresh: bool = False
+
+
 class Session(BaseModel):
     id: str
     title: str
@@ -30,7 +38,29 @@ class Session(BaseModel):
     status: Literal["READY", "PROCESSING", "DRAFT"]
     created_at: datetime
     data_cutoff: str
+    subtitle: str = ""
+    updated_at: datetime | None = None
+    pinned: bool = False
     is_mock: bool = True
+
+
+class SessionPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    pinned: bool | None = None
+
+
+class SessionMessage(BaseModel):
+    id: str
+    session_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+    provider: str | None = None
+    is_mock: bool = False
+
+
+class ReportCreate(BaseModel):
+    format: Literal["markdown"] = "markdown"
 
 
 class ResearchJob(BaseModel):
