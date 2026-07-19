@@ -31,6 +31,11 @@ def test_infer_scope_normalizes_lowercase_target_input() -> None:
     assert modality == "小分子"
 
 
+def test_infer_scope_accepts_short_lowercase_target_input() -> None:
+    target, _, _ = infer_scope("靶点身份：确认标准实体、别名和蛋白关系 jak")
+    assert target == "JAK"
+
+
 def test_research_returns_accepted_job() -> None:
     response = client.post("/api/v1/sessions/session-ror1/research")
     assert response.status_code == 202
@@ -89,7 +94,8 @@ def test_research_card_and_message_history_keep_target_context() -> None:
     assert answer.status_code == 200
     assert answer.json()["context_session_id"] == session_id
     history = client.get(f"/api/v1/sessions/{session_id}/messages").json()
-    assert [item["role"] for item in history] == ["user", "assistant"]
+    assert [item["role"] for item in history] == ["user", "user", "assistant"]
+    assert history[0]["content"] == created.json()["question"]
 
 
 def test_score_and_memo_use_the_current_target_card() -> None:

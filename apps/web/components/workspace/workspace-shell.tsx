@@ -57,6 +57,9 @@ export function WorkspaceShell() {
 
   const currentSession = useMemo(() => sessions.find((session) => session.id === activeId), [activeId, sessions]);
   const stage = progressSequence[progressIndex];
+  const firstFollowUpIndex = conversation.findIndex((item, index) => index > 0 && item.kind === "user");
+  const conversationBeforeCard = firstFollowUpIndex === -1 ? conversation : conversation.slice(0, firstFollowUpIndex);
+  const conversationAfterCard = firstFollowUpIndex === -1 ? [] : conversation.slice(firstFollowUpIndex);
 
   useEffect(() => {
     if (!isResearching) return;
@@ -71,7 +74,8 @@ export function WorkspaceShell() {
     setDrawerEvidence(null);
     try {
       const [detail, card, messages, score] = await Promise.all([httpClient.getSession(id), httpClient.getTargetCard(id), httpClient.getMessages(id), httpClient.getScores(id)]);
-      setSessions((existing) => existing.some((session) => session.id === detail.id) ? existing.map((session) => session.id === detail.id ? { ...session, ...detail } : session) : [...existing, detail]);
+      const displayDetail = detail.title.startsWith("未解析靶点") && card.target.symbol !== "未解析靶点" ? { ...detail, title: `${card.target.symbol} · ${card.scope.disease || "新建研读"}` } : detail;
+      setSessions((existing) => existing.some((session) => session.id === displayDetail.id) ? existing.map((session) => session.id === displayDetail.id ? { ...session, ...displayDetail } : session) : [...existing, displayDetail]);
       setCurrentCard(card);
       setSourceMode(card.metadata.isMock ? "离线缓存" : "实时来源");
       setOfficialOnly(false);
@@ -255,12 +259,13 @@ export function WorkspaceShell() {
         <div className="conversation-viewport">
           {!hasResearch ? <EmptyWorkspace onPreset={setComposerSeed} onTutorial={() => router.push("/tutorial")} /> : <div className="conversation-column">
             <div className="conversation-intro"><span className="conversation-date">当前会话</span><span className="intro-rule" /><span className="conversation-cutoff">数据截至 {currentCard?.metadata.dataCutoff ?? "检索完成后"}</span></div>
-            {conversation.map((item, index) => item.kind === "user" ? <UserMessage key={`user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
+            {conversationBeforeCard.map((item, index) => item.kind === "user" ? <UserMessage key={`user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
             {(isResearching || (loadingSession && !currentCard)) ? <ResearchProgress stage={stage} onRetry={() => setProgressIndex(Math.max(progressIndex - 1, 0))} /> : null}
             {!isResearching && currentCard ? <TargetCard card={currentCard} onEvidence={setDrawerEvidence} onExport={exportReport} onRefresh={() => void refreshResearch()} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} /> : null}
             {!isResearching && currentCard && memoVisible && currentMemo ? <DecisionMemo memo={currentMemo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} /> : null}
             {!isResearching && currentScore ? <ScorePanel score={currentScore} onEvidence={openEvidence} /> : null}
             {!isResearching && currentCard && !memoVisible ? <button className="generate-memo-banner" onClick={() => void generateMemo()}><span><Sparkles size={17} /><strong>生成立项建议</strong><small>基于当前证据、风险和竞争信号形成可验证的下一步</small></span><ArrowLeft size={17} className="turn-right" /></button> : null}
+            {conversationAfterCard.map((item, index) => item.kind === "user" ? <UserMessage key={`follow-up-user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
           </div>}
         </div>
         <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => void generateMemo()} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />

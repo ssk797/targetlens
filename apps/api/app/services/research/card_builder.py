@@ -46,6 +46,11 @@ def _infer_target(normalized: str) -> str:
             score += 3
         if "-" in token:
             score += 1
+        # A short lowercase symbol (for example ``jak``) is still a valid
+        # user-entered target. Keep the score deliberately low so a more
+        # specific gene-like token such as ``jak2`` wins when both are present.
+        if score == 0 and len(lower) >= 2:
+            score = 1
         if score:
             candidates.append((score, -index, token))
     if not candidates:

@@ -49,7 +49,7 @@ export function HistorySidebar({ sessions, activeId, collapsed, onToggle, onSele
       </div>
 
       <div className="sidebar-footer">
-        <button className="tutorial-entry" onClick={onTutorial}><span className="tutorial-entry-icon"><BookOpen size={15} /></span><span><strong>教程练习</strong><small>EGFR · 2 / 9 已解锁</small></span><ChevronRight size={15} /></button>
+        <button className="tutorial-entry" onClick={onTutorial}><span className="tutorial-entry-icon"><BookOpen size={15} /></span><span><strong>教程练习</strong><small>EGFR · 9 / 9 已开放</small></span><ChevronRight size={15} /></button>
         <div className="user-row"><div className="avatar">S</div><span><strong>研究工作台</strong><small>实时来源已连接</small></span><button className="icon-button" aria-label="打开设置"><Settings2 size={16} /></button></div>
       </div>
     </aside>

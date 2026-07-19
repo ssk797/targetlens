@@ -84,6 +84,7 @@ if settings.api_mode != "database":
     ]
 TARGET_CARDS: dict[str, dict[str, Any]] = {}
 RESEARCH_BUNDLES: dict[str, ResearchBundle] = {}
+LEGACY_ROR1_SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def _is_uuid(value: str) -> bool:
@@ -131,7 +132,7 @@ async def _db_list_sessions() -> list[Session]:
                     data_cutoff=row.data_cutoff,
                     subtitle=_session_subtitle(row.question, row.status),
                     updated_at=row.updated_at,
-                    pinned=False,
+                    pinned=str(row.id) == LEGACY_ROR1_SESSION_ID,
                     is_mock=row.mode == "mock",
                 )
                 for row in rows
@@ -165,6 +166,46 @@ async def _db_create_session(session: Session) -> None:
         # The API remains usable when the optional database is temporarily down;
         # the health endpoint exposes that state and the in-memory cache keeps
         # the active task alive.
+        return
+
+
+async def _ensure_legacy_ror1_session() -> None:
+    """Keep the original ROR1 record as historical navigation, not a fixture.
+
+    New sessions are always researched from the submitted target. This one
+    record is retained so existing users do not lose their earlier ROR1 work;
+    its card is rebuilt from live connectors on first open when no card exists.
+    """
+
+    if settings.api_mode != "database":
+        return
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import ResearchSession as DbResearchSession
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            exists = await db.scalar(select(DbResearchSession.id).where(DbResearchSession.id == UUID(LEGACY_ROR1_SESSION_ID)))
+            if exists is not None:
+                return
+        session = Session(
+            id=LEGACY_ROR1_SESSION_ID,
+            title="ROR1 · ADC 立项判断",
+            question="ROR1 在三阴性乳腺癌中是否适合开发 ADC？",
+            status="READY",
+            created_at=now_utc(),
+            data_cutoff=DATA_CUTOFF,
+            subtitle="三阴性乳腺癌 · 历史研读",
+            updated_at=now_utc(),
+            pinned=True,
+            is_mock=False,
+        )
+        SESSIONS[session.id] = session
+        SESSION_MESSAGES[session.id] = []
+        await _db_create_session(session)
+        await _ensure_initial_message(session)
+    except Exception:
         return
 
 
@@ -213,10 +254,58 @@ async def _db_save_message(message: SessionMessage) -> None:
 
         async with SessionFactory() as db:
             metadata = {"provider": message.provider, "is_mock": message.is_mock}
-            db.add(DbSessionMessage(id=UUID(message.id), session_id=UUID(message.session_id), role=message.role, content=message.content, citations=[metadata]))
+            db.add(DbSessionMessage(id=UUID(message.id), session_id=UUID(message.session_id), role=message.role, content=message.content, citations=[metadata], created_at=message.created_at))
             await db.commit()
     except Exception:
         return
+
+
+async def _db_update_message_timestamp(message_id: str, created_at: Any) -> None:
+    if settings.api_mode != "database" or not _is_uuid(message_id):
+        return
+    try:
+        from sqlalchemy import update
+
+        from app.db.models.core import SessionMessage as DbSessionMessage
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            await db.execute(update(DbSessionMessage).where(DbSessionMessage.id == UUID(message_id)).values(created_at=created_at))
+            await db.commit()
+    except Exception:
+        return
+
+
+async def _ensure_initial_message(session: Session, *, is_mock: bool = False) -> None:
+    """Persist the first user question as soon as a session exists.
+
+    The old client kept this turn only in React state, so a page refresh made
+    the opening question disappear from the history. Keeping it in the same
+    message store as follow-up turns makes a session replayable even if the
+    research job is still running or a connector later fails.
+    """
+
+    history = SESSION_MESSAGES.get(session.id)
+    if history is None:
+        history = await _db_list_messages(session.id)
+        SESSION_MESSAGES[session.id] = history
+    existing = next((item for item in history if item.role == "user" and item.content.strip() == session.question.strip()), None)
+    if existing is not None:
+        if existing.created_at > session.created_at:
+            existing.created_at = session.created_at
+            await _db_update_message_timestamp(existing.id, session.created_at)
+            history.sort(key=lambda item: item.created_at)
+        return
+    message = SessionMessage(
+        id=str(uuid4()),
+        session_id=session.id,
+        role="user",
+        content=session.question,
+        created_at=session.created_at,
+        is_mock=is_mock,
+    )
+    history.insert(0, message)
+    await _db_save_message(message)
 
 
 async def _db_list_messages(session_id: str) -> list[SessionMessage]:
@@ -551,7 +640,10 @@ async def research_preview(payload: ResearchPreviewRequest) -> ResearchBundle:
 
 @app.get("/api/v1/sessions", response_model=list[Session])
 async def list_sessions() -> list[Session]:
+    await _ensure_legacy_ror1_session()
     db_sessions = await _db_list_sessions()
+    for session in db_sessions:
+        await _ensure_initial_message(session, is_mock=session.is_mock)
     merged = {session.id: _session_with_defaults(session) for session in SESSIONS.values()}
     merged.update({session.id: _session_with_defaults(session) for session in db_sessions})
     return list(merged.values())
@@ -575,6 +667,7 @@ async def create_session(payload: SessionCreate) -> Session:
     SESSIONS[session_id] = session
     SESSION_MESSAGES[session_id] = []
     await _db_create_session(session)
+    await _ensure_initial_message(session, is_mock=not (settings.ai_enabled or settings.api_mode == "database"))
     return _session_with_defaults(session)
 
 
@@ -588,6 +681,7 @@ async def get_session(session_id: str) -> Session:
     if session is None:
         raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
     SESSIONS[session_id] = session
+    await _ensure_initial_message(session, is_mock=session.is_mock)
     return _session_with_defaults(session)
 
 
@@ -628,6 +722,7 @@ async def start_research(session_id: str, payload: ResearchStart | None = None) 
     # desktop configuration has AI_ENABLED=true, so it always uses public
     # connectors and never silently falls back to the ROR1 demo card.
     use_live_connectors = settings.ai_enabled or settings.api_mode == "database"
+    await _ensure_initial_message(session, is_mock=not use_live_connectors)
     if use_live_connectors:
         bundle = await _fetch_research_bundle(
             target,
@@ -688,8 +783,28 @@ async def events(session_id: str, last_event_id: str | None = Header(default=Non
 async def target_card(session_id: str) -> dict[str, Any]:
     session = await get_session(session_id)
     card = TARGET_CARDS.get(session_id) or await _db_load_card(session_id)
+    expected_target, expected_disease, expected_modality = infer_scope(session.question)
+    stored_target = str((card or {}).get("target", {}).get("symbol", ""))
+    # Older sessions could contain the unresolved demo card even after the
+    # question had a recognizable lowercase target. Rebuild that stale card
+    # from the current connectors instead of showing the placeholder forever.
+    should_rebuild_card = card is not None and expected_target != "未解析靶点" and stored_target != expected_target
+    should_repair_title = expected_target != "未解析靶点" and session.title.startswith("未解析靶点")
+    if should_rebuild_card or should_repair_title:
+        if should_rebuild_card:
+            card = None
+        repaired_session = session.model_copy(
+            update={
+                "title": f"{expected_target} · {expected_disease or '新建研读'}"[:48],
+                "subtitle": _session_subtitle(session.question, "READY"),
+                "updated_at": now_utc(),
+            }
+        )
+        SESSIONS[session_id] = repaired_session
+        await _db_update_session(repaired_session)
+        session = repaired_session
     if card is None:
-        target, disease, modality = infer_scope(session.question)
+        target, disease, modality = expected_target, expected_disease, expected_modality
         use_live_connectors = settings.ai_enabled or settings.api_mode == "database"
         bundle = await _fetch_research_bundle(target, disease, modality) if use_live_connectors else demo_bundle(target, disease, modality)
         card = build_target_card(session_id, session.question, bundle, DATA_CUTOFF, is_mock=not use_live_connectors)
