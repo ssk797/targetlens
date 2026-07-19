@@ -1,10 +1,52 @@
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.services.auth import is_valid_email, normalize_email
 
 
 DatabaseStatus = Literal["connected", "not_configured", "unavailable"]
+
+
+class AuthRegister(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=8, max_length=200)
+    display_name: str = Field(default="研究员", min_length=1, max_length=120)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        normalized = normalize_email(value)
+        if not is_valid_email(normalized):
+            raise ValueError("请输入有效的邮箱地址")
+        return normalized
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str) -> str:
+        return value.strip() or "研究员"
+
+
+class AuthLogin(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=1, max_length=200)
+    remember: bool = False
+
+    @field_validator("email")
+    @classmethod
+    def normalize_login_email(cls, value: str) -> str:
+        return normalize_email(value)
+
+
+class AuthUser(BaseModel):
+    id: str
+    email: str
+    display_name: str
+
+
+class AuthResponse(BaseModel):
+    user: AuthUser
 
 
 class SessionCreate(BaseModel):

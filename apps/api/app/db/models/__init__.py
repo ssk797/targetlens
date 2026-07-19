@@ -1,5 +1,6 @@
 from app.db.models.core import (
     AuditLog,
+    AuthSession,
     Base,
     Claim,
     ClaimEvidence,
@@ -18,10 +19,12 @@ from app.db.models.core import (
     TutorialAttempt,
     TutorialCourse,
     TutorialLesson,
+    UserAccount,
 )
 
 __all__ = [
     "AuditLog",
+    "AuthSession",
     "Base",
     "Claim",
     "ClaimEvidence",
@@ -40,4 +43,5 @@ __all__ = [
     "TutorialAttempt",
     "TutorialCourse",
     "TutorialLesson",
+    "UserAccount",
 ]

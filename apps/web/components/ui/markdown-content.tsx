@@ -34,6 +34,16 @@ function inlineMarkdown(text: string): ReactNode[] {
   return nodes;
 }
 
+function tableCells(line: string) {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function isTableSeparator(line: string) {
+  const cells = tableCells(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
 export function MarkdownContent({ content }: { content: string }) {
   const lines = normalizeMarkdown(content).split(/\r?\n/);
   const blocks: ReactNode[] = [];
@@ -72,6 +82,25 @@ export function MarkdownContent({ content }: { content: string }) {
         index += 1;
       }
       blocks.push(<blockquote key={key++}>{quoteLines.map((item) => <p key={item}>{inlineMarkdown(item)}</p>)}</blockquote>);
+      continue;
+    }
+    if (line.includes("|") && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      const headers = tableCells(line);
+      const separator = tableCells(lines[index + 1]);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        rows.push(tableCells(lines[index]));
+        index += 1;
+      }
+      blocks.push(
+        <div className="markdown-table-wrap" key={key++}>
+          <table>
+            <thead><tr>{headers.map((header, cellIndex) => <th key={`${header}-${cellIndex}`} style={{ textAlign: separator[cellIndex]?.startsWith(":") && separator[cellIndex]?.endsWith(":") ? "center" : separator[cellIndex]?.endsWith(":") ? "right" : "left" }}>{inlineMarkdown(header)}</th>)}</tr></thead>
+            <tbody>{rows.map((row, rowIndex) => <tr key={`row-${rowIndex}`}>{headers.map((_, cellIndex) => <td key={`cell-${rowIndex}-${cellIndex}`}>{inlineMarkdown(row[cellIndex] ?? "")}</td>)}</tr>)}</tbody>
+          </table>
+        </div>,
+      );
       continue;
     }
     const listMatch = line.match(/^\s*([-*]|\d+[.)])\s+(.+)$/);

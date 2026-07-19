@@ -1,7 +1,14 @@
 import { mockAnswers, mockDecisionMemo, mockSessions, mockScore, mockTargetCard, mockTutorial } from "@/lib/mocks/data";
 import type { TargetLensClient } from "@/lib/api/client";
 
+const mockUser = { id: "local-demo", email: "demo@targetlens.local", displayName: "本地演示研究员" };
+
 export const mockClient: TargetLensClient = {
+  async getCurrentUser() { return mockUser; },
+  async login() { return mockUser; },
+  async register() { return mockUser; },
+  async demoLogin() { return mockUser; },
+  async logout() {},
   async listSessions() { return mockSessions; },
   async getSession(id) { return { ...mockSessions.find((session) => session.id === id) ?? mockSessions[0], question: mockTargetCard.scope.question, targetCard: mockTargetCard, score: mockScore, decisionMemo: mockDecisionMemo }; },
   async createSession(input) { return { id: `session-${Date.now()}`, title: input.question.slice(0, 30), subtitle: "刚刚创建 · Mock", status: "DRAFT", updatedAt: "刚刚" }; },

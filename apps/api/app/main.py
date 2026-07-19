@@ -3,19 +3,23 @@ import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.schemas import (
     DatabaseStatus,
     DecisionMemoRequest,
+    AuthLogin,
+    AuthRegister,
+    AuthResponse,
+    AuthUser,
     HealthResponse,
     MessageCreate,
     ReportCreate,
@@ -29,6 +33,7 @@ from app.schemas import (
     now_utc,
 )
 from app.services.ai.deepseek import DeepSeekClient, DeepSeekProviderError
+from app.services.auth import hash_password, hash_session_token, new_session_token, normalize_email, verify_password
 from app.services.research.card_builder import build_target_card, demo_bundle, infer_scope
 from app.services.research.cache import cache_key, get_bundle as get_cached_bundle, put_bundle as put_cached_bundle
 from app.services.research.connectors import ResearchAggregator, ResearchBundle
@@ -53,6 +58,22 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_workspace_auth(request: Request, call_next):
+    """Require a real browser session for database-backed workspace data.
+
+    The API test suite uses mock mode and remains intentionally auth-free. In
+    the desktop/database deployment, every session and evidence endpoint is
+    protected by the same HttpOnly cookie used by the login page.
+    """
+
+    if request.method != "OPTIONS" and settings.api_mode == "database" and request.url.path.startswith("/api/v1/sessions"):
+        user = await _load_request_user(request)
+        if user is None:
+            return JSONResponse({"detail": "AUTH_REQUIRED"}, status_code=status.HTTP_401_UNAUTHORIZED)
+    return await call_next(request)
 
 DATA_CUTOFF = settings.data_cutoff or date.today().isoformat()
 SESSIONS: dict[str, Session] = {}
@@ -87,6 +108,135 @@ TARGET_CARDS: dict[str, dict[str, Any]] = {}
 RESEARCH_BUNDLES: dict[str, ResearchBundle] = {}
 DECISION_MEMOS: dict[str, dict[str, Any]] = {}
 LEGACY_ROR1_SESSION_ID = "00000000-0000-0000-0000-000000000001"
+DEMO_EMAIL = "demo@targetlens.local"
+DEMO_PASSWORD = "TargetLens-demo-2026"
+DEV_USERS: dict[str, dict[str, str]] = {}
+DEV_AUTH_TOKENS: dict[str, tuple[str, datetime]] = {}
+
+
+def _user_schema(*, user_id: str, email: str, display_name: str) -> AuthUser:
+    return AuthUser(id=user_id, email=email, display_name=display_name)
+
+
+async def _db_user_by_email(email: str):
+    if settings.api_mode != "database":
+        return DEV_USERS.get(normalize_email(email))
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import UserAccount
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            return await db.scalar(select(UserAccount).where(UserAccount.email == normalize_email(email), UserAccount.is_active.is_(True)))
+    except Exception:
+        return None
+
+
+async def _load_request_user(request: Request) -> AuthUser | None:
+    cached = getattr(request.state, "auth_user", None)
+    if isinstance(cached, AuthUser):
+        return cached
+    token = request.cookies.get(settings.auth_cookie_name)
+    if not token:
+        return None
+    token_hash = hash_session_token(token)
+    user: AuthUser | None = None
+    now = now_utc()
+    if settings.api_mode == "database":
+        try:
+            from sqlalchemy import select
+
+            from app.db.models.core import AuthSession as DbAuthSession
+            from app.db.models.core import UserAccount
+            from app.db.session import SessionFactory
+
+            async with SessionFactory() as db:
+                row = (await db.execute(
+                    select(UserAccount, DbAuthSession)
+                    .join(DbAuthSession, DbAuthSession.user_id == UserAccount.id)
+                    .where(
+                        DbAuthSession.token_hash == token_hash,
+                        DbAuthSession.revoked_at.is_(None),
+                        DbAuthSession.expires_at > now,
+                        UserAccount.is_active.is_(True),
+                    )
+                )).first()
+                if row:
+                    account, auth_session = row
+                    auth_session.last_seen_at = now
+                    await db.commit()
+                    user = _user_schema(user_id=str(account.id), email=account.email, display_name=account.display_name)
+        except Exception:
+            user = None
+    else:
+        entry = DEV_AUTH_TOKENS.get(token_hash)
+        if entry and entry[1] > now:
+            account = next((item for item in DEV_USERS.values() if item["id"] == entry[0]), None)
+            if account:
+                user = _user_schema(user_id=account["id"], email=account["email"], display_name=account["display_name"])
+        elif entry:
+            DEV_AUTH_TOKENS.pop(token_hash, None)
+    if user:
+        request.state.auth_user = user
+    return user
+
+
+def _set_auth_cookie(response: Response, token: str, *, remember: bool) -> None:
+    max_age = int(settings.auth_session_ttl_hours * 3600) if remember else int(12 * 3600)
+    response.set_cookie(
+        settings.auth_cookie_name,
+        token,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="lax",
+        path="/",
+    )
+
+
+async def _issue_auth_session(response: Response, user: AuthUser, *, remember: bool) -> None:
+    token = new_session_token()
+    token_hash = hash_session_token(token)
+    now = now_utc()
+    expires_at = now + timedelta(seconds=(settings.auth_session_ttl_hours * 3600 if remember else 12 * 3600))
+    if settings.api_mode == "database":
+        from app.db.models.core import AuthSession as DbAuthSession
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            db.add(DbAuthSession(user_id=UUID(user.id), token_hash=token_hash, expires_at=expires_at, created_at=now, last_seen_at=now))
+            await db.commit()
+    else:
+        DEV_AUTH_TOKENS[token_hash] = (user.id, expires_at)
+    _set_auth_cookie(response, token, remember=remember)
+
+
+async def _auth_user_from_request(request: Request) -> AuthUser:
+    user = await _load_request_user(request)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="AUTH_REQUIRED")
+    return user
+
+
+async def _upsert_demo_user() -> AuthUser:
+    existing = await _db_user_by_email(DEMO_EMAIL)
+    if settings.api_mode != "database":
+        if not existing:
+            DEV_USERS[DEMO_EMAIL] = {"id": "local-demo", "email": DEMO_EMAIL, "display_name": "本地演示研究员", "password_hash": hash_password(DEMO_PASSWORD)}
+            existing = DEV_USERS[DEMO_EMAIL]
+        return _user_schema(user_id=existing["id"], email=existing["email"], display_name=existing["display_name"])
+    if existing is None:
+        from app.db.models.core import UserAccount
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            account = UserAccount(email=DEMO_EMAIL, display_name="本地演示研究员", password_hash=hash_password(DEMO_PASSWORD))
+            db.add(account)
+            await db.commit()
+            await db.refresh(account)
+            existing = account
+    return _user_schema(user_id=str(existing.id), email=existing.email, display_name=existing.display_name)
 
 
 def _is_uuid(value: str) -> bool:
@@ -113,17 +263,23 @@ def _session_with_defaults(session: Session) -> Session:
     )
 
 
-async def _db_list_sessions() -> list[Session]:
+async def _db_list_sessions(user_id: str | None = None) -> list[Session]:
     if settings.api_mode != "database":
         return []
     try:
-        from sqlalchemy import select
+        from sqlalchemy import or_, select
 
         from app.db.models.core import ResearchSession as DbResearchSession
         from app.db.session import SessionFactory
 
         async with SessionFactory() as db:
-            rows = (await db.execute(select(DbResearchSession).order_by(DbResearchSession.updated_at.desc()))).scalars().all()
+            query = select(DbResearchSession)
+            if user_id:
+                if _is_uuid(user_id):
+                    query = query.where(or_(DbResearchSession.is_demo.is_(True), DbResearchSession.owner_id == UUID(user_id)))
+                else:
+                    query = query.where(DbResearchSession.is_demo.is_(True))
+            rows = (await db.execute(query.order_by(DbResearchSession.updated_at.desc()))).scalars().all()
             return [
                 Session(
                     id=str(row.id),
@@ -143,7 +299,7 @@ async def _db_list_sessions() -> list[Session]:
         return []
 
 
-async def _db_create_session(session: Session) -> None:
+async def _db_create_session(session: Session, *, owner_id: str | None = None, is_demo: bool = False) -> None:
     if settings.api_mode != "database" or not _is_uuid(session.id):
         return
     try:
@@ -161,6 +317,8 @@ async def _db_create_session(session: Session) -> None:
                     mode="live" if not session.is_mock else "mock",
                     created_at=session.created_at,
                     updated_at=session.updated_at or session.created_at,
+                    owner_id=UUID(owner_id) if owner_id and _is_uuid(owner_id) else None,
+                    is_demo=is_demo,
                 )
             )
             await db.commit()
@@ -205,7 +363,7 @@ async def _ensure_legacy_ror1_session() -> None:
         )
         SESSIONS[session.id] = session
         SESSION_MESSAGES[session.id] = []
-        await _db_create_session(session)
+        await _db_create_session(session, is_demo=True)
         await _ensure_initial_message(session)
     except Exception:
         return
@@ -670,6 +828,95 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok", mode=settings.api_mode, timestamp=now_utc(), database=await database_status())
 
 
+@app.post("/api/v1/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+async def register(payload: AuthRegister, response: Response) -> AuthResponse:
+    """Create a local research account and sign the browser in immediately."""
+
+    email = normalize_email(payload.email)
+    existing = await _db_user_by_email(email)
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_ALREADY_REGISTERED")
+    if settings.api_mode == "database":
+        from app.db.models.core import UserAccount
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            account = UserAccount(email=email, display_name=payload.display_name, password_hash=hash_password(payload.password))
+            db.add(account)
+            await db.commit()
+            await db.refresh(account)
+            user = _user_schema(user_id=str(account.id), email=account.email, display_name=account.display_name)
+    else:
+        user_id = f"local-{uuid4().hex[:12]}"
+        DEV_USERS[email] = {"id": user_id, "email": email, "display_name": payload.display_name, "password_hash": hash_password(payload.password)}
+        user = _user_schema(user_id=user_id, email=email, display_name=payload.display_name)
+    await _issue_auth_session(response, user, remember=True)
+    return AuthResponse(user=user)
+
+
+@app.post("/api/v1/auth/login", response_model=AuthResponse)
+async def login(payload: AuthLogin, response: Response) -> AuthResponse:
+    email = normalize_email(payload.email)
+    account = await _db_user_by_email(email)
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_CREDENTIALS")
+    password_hash = account["password_hash"] if isinstance(account, dict) else account.password_hash
+    if not verify_password(payload.password, password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_CREDENTIALS")
+    if isinstance(account, dict):
+        user = _user_schema(user_id=account["id"], email=account["email"], display_name=account["display_name"])
+    else:
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            from sqlalchemy import update
+
+            from app.db.models.core import UserAccount
+
+            await db.execute(update(UserAccount).where(UserAccount.id == account.id).values(last_login_at=now_utc()))
+            await db.commit()
+        user = _user_schema(user_id=str(account.id), email=account.email, display_name=account.display_name)
+    await _issue_auth_session(response, user, remember=payload.remember)
+    return AuthResponse(user=user)
+
+
+@app.post("/api/v1/auth/demo", response_model=AuthResponse)
+async def demo_login(response: Response) -> AuthResponse:
+    """Issue a local-only demo session without exposing a reusable password."""
+
+    user = await _upsert_demo_user()
+    await _issue_auth_session(response, user, remember=True)
+    return AuthResponse(user=user)
+
+
+@app.get("/api/v1/auth/me", response_model=AuthUser)
+async def current_user(request: Request) -> AuthUser:
+    return await _auth_user_from_request(request)
+
+
+@app.post("/api/v1/auth/logout")
+async def logout(request: Request, response: Response) -> dict[str, bool]:
+    token = request.cookies.get(settings.auth_cookie_name)
+    if token:
+        token_hash = hash_session_token(token)
+        if settings.api_mode == "database":
+            try:
+                from sqlalchemy import update
+
+                from app.db.models.core import AuthSession as DbAuthSession
+                from app.db.session import SessionFactory
+
+                async with SessionFactory() as db:
+                    await db.execute(update(DbAuthSession).where(DbAuthSession.token_hash == token_hash).values(revoked_at=now_utc()))
+                    await db.commit()
+            except Exception:
+                logger.warning("auth_logout_persist_failed", exc_info=True)
+        else:
+            DEV_AUTH_TOKENS.pop(token_hash, None)
+    response.delete_cookie(settings.auth_cookie_name, path="/")
+    return {"ok": True}
+
+
 @app.get("/api/v1/ai/status")
 async def ai_status() -> dict[str, object]:
     configured = bool(settings.deepseek_api_key and settings.deepseek_api_key.get_secret_value().strip())
@@ -694,9 +941,10 @@ async def research_preview(payload: ResearchPreviewRequest) -> ResearchBundle:
 
 
 @app.get("/api/v1/sessions", response_model=list[Session])
-async def list_sessions() -> list[Session]:
+async def list_sessions(request: Request) -> list[Session]:
     await _ensure_legacy_ror1_session()
-    db_sessions = await _db_list_sessions()
+    user = await _auth_user_from_request(request) if settings.api_mode == "database" else None
+    db_sessions = await _db_list_sessions(user.id if user else None)
     for session in db_sessions:
         await _ensure_initial_message(session, is_mock=session.is_mock)
     merged = {session.id: _session_with_defaults(session) for session in SESSIONS.values()}
@@ -705,7 +953,8 @@ async def list_sessions() -> list[Session]:
 
 
 @app.post("/api/v1/sessions", response_model=Session, status_code=status.HTTP_201_CREATED)
-async def create_session(payload: SessionCreate) -> Session:
+async def create_session(payload: SessionCreate, request: Request) -> Session:
+    user = await _auth_user_from_request(request) if settings.api_mode == "database" else None
     session_id = str(uuid4()) if settings.api_mode == "database" else f"session-{uuid4().hex[:8]}"
     target, disease, _ = infer_scope(payload.question)
     session = Session(
@@ -721,7 +970,7 @@ async def create_session(payload: SessionCreate) -> Session:
     )
     SESSIONS[session_id] = session
     SESSION_MESSAGES[session_id] = []
-    await _db_create_session(session)
+    await _db_create_session(session, owner_id=user.id if user else None, is_demo=False)
     await _ensure_initial_message(session, is_mock=not (settings.ai_enabled or settings.api_mode == "database"))
     return _session_with_defaults(session)
 

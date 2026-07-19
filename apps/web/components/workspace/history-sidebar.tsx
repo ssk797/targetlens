@@ -3,6 +3,7 @@
 import { BookOpen, ChevronLeft, ChevronRight, Clock3, Download, MoreHorizontal, Pencil, Pin, Plus, Search, Settings2, Sparkles, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { ResearchSession } from "@/lib/types/domain";
+import type { AuthUser } from "@/lib/api/client";
 import { StatusPill } from "@/components/ui/status-pill";
 
 interface HistorySidebarProps {
@@ -22,9 +23,11 @@ interface HistorySidebarProps {
   officialOnly?: boolean;
   onSettings: () => void;
   onToggleOfficial?: () => void;
+  user?: AuthUser | null;
+  onLogout?: () => void;
 }
 
-export function HistorySidebar({ sessions, activeId, collapsed, onToggle, onSelect, onNew, onTutorial, onRename, onTogglePin, onDelete, onExport, searchInputRef, settingsOpen = false, officialOnly = false, onSettings, onToggleOfficial }: HistorySidebarProps) {
+export function HistorySidebar({ sessions, activeId, collapsed, onToggle, onSelect, onNew, onTutorial, onRename, onTogglePin, onDelete, onExport, searchInputRef, settingsOpen = false, officialOnly = false, onSettings, onToggleOfficial, user, onLogout }: HistorySidebarProps) {
   const [query, setQuery] = useState("");
 
   if (collapsed) {
@@ -62,8 +65,8 @@ export function HistorySidebar({ sessions, activeId, collapsed, onToggle, onSele
 
       <div className="sidebar-footer">
         <button className="tutorial-entry" onClick={onTutorial}><span className="tutorial-entry-icon"><BookOpen size={15} /></span><span><strong>教程练习</strong><small>EGFR · 9 / 9 已开放</small></span><ChevronRight size={15} /></button>
-        {settingsOpen ? <div className="sidebar-settings" role="dialog" aria-label="工作台设置"><div className="sidebar-settings-head"><strong>工作台设置</strong><button className="icon-button" onClick={onSettings} aria-label="关闭设置">×</button></div><p>控制当前会话的检索偏好，不会改变已保存的证据。</p><button className={`sidebar-setting-toggle ${officialOnly ? "sidebar-setting-toggle-active" : ""}`} onClick={onToggleOfficial} aria-pressed={officialOnly}><span><strong>仅使用官方来源</strong><small>UniProt · Open Targets · ChEMBL · ClinicalTrials.gov · 企业公告</small></span><span className="toggle-indicator">{officialOnly ? "开" : "关"}</span></button><div className="sidebar-shortcut"><kbd>Ctrl F</kbd><span>快速聚焦会话搜索</span></div></div> : null}
-        <div className="user-row"><div className="avatar">S</div><span><strong>研究工作台</strong><small>实时来源已连接</small></span><button className="icon-button" onClick={onSettings} aria-label={settingsOpen ? "关闭设置" : "打开设置"} aria-expanded={settingsOpen}><Settings2 size={16} /></button></div>
+        {settingsOpen ? <div className="sidebar-settings" role="dialog" aria-label="工作台设置"><div className="sidebar-settings-head"><strong>工作台设置</strong><button className="icon-button" onClick={onSettings} aria-label="关闭设置">×</button></div><p>控制当前会话的检索偏好，不会改变已保存的证据。</p><button className={`sidebar-setting-toggle ${officialOnly ? "sidebar-setting-toggle-active" : ""}`} onClick={onToggleOfficial} aria-pressed={officialOnly}><span><strong>仅使用官方来源</strong><small>UniProt · Open Targets · ChEMBL · ClinicalTrials.gov · 企业公告</small></span><span className="toggle-indicator">{officialOnly ? "开" : "关"}</span></button><div className="sidebar-shortcut"><kbd>Ctrl F</kbd><span>快速聚焦会话搜索</span></div>{onLogout ? <button className="sidebar-logout" type="button" onClick={onLogout}>退出当前账户</button> : null}</div> : null}
+        <div className="user-row"><div className="avatar">{(user?.displayName || user?.email || "S").slice(0, 1).toUpperCase()}</div><span><strong title={user?.displayName || "研究工作台"}>{user?.displayName || "研究工作台"}</strong><small title={user?.email || "实时来源已连接"}>{user?.email || "实时来源已连接"}</small></span><button className="icon-button" onClick={onSettings} aria-label={settingsOpen ? "关闭设置" : "打开设置"} aria-expanded={settingsOpen}><Settings2 size={16} /></button></div>
       </div>
     </aside>
   );

@@ -1,5 +1,6 @@
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
+import { AuthGate } from "@/components/auth/auth-gate";
 
 export default function WorkspacePage() {
-  return <WorkspaceShell />;
+  return <AuthGate><WorkspaceShell /></AuthGate>;
 }

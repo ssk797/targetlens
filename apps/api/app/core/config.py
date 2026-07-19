@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     deepseek_base_url: str = Field(default="https://api.deepseek.com", validation_alias="DEEPSEEK_BASE_URL")
     deepseek_model_fast: str = Field(default="deepseek-v4-flash", validation_alias="DEEPSEEK_MODEL_FAST")
     deepseek_model_reasoning: str = Field(default="deepseek-v4-pro", validation_alias="DEEPSEEK_MODEL_REASONING")
+    auth_cookie_name: str = Field(default="targetlens_auth", validation_alias="TARGETLENS_AUTH_COOKIE_NAME")
+    auth_session_ttl_hours: int = Field(default=168, validation_alias="TARGETLENS_AUTH_SESSION_TTL_HOURS")
 
     @property
     def allowed_origins(self) -> list[str]:

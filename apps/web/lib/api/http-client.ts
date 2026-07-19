@@ -1,4 +1,4 @@
-import type { AskInput, CreateSessionInput, ResearchInput, ResearchJob, ResearchSessionDetail, SessionMessageRecord, SessionPatchInput, TargetLensClient } from "@/lib/api/client";
+import type { AskInput, AuthLoginInput, AuthRegisterInput, AuthUser, CreateSessionInput, ResearchInput, ResearchJob, ResearchSessionDetail, SessionMessageRecord, SessionPatchInput, TargetLensClient } from "@/lib/api/client";
 import type { DecisionMemo, GroundedAnswer, ResearchSession, ScoreSnapshot, TargetCard, TutorialCourse } from "@/lib/types/domain";
 
 // The desktop browser may isolate `localhost` from the local API port while
@@ -30,6 +30,9 @@ interface BackendSession {
   pinned?: boolean;
   is_mock?: boolean;
 }
+
+interface BackendUser { id: string; email: string; display_name: string }
+interface BackendAuthResponse { user: BackendUser }
 
 interface BackendScore {
   base_opportunity: number;
@@ -78,12 +81,22 @@ function normalizeSession(session: BackendSession): ResearchSession & { question
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, { ...init, headers: { "Content-Type": "application/json", ...init?.headers } });
+  const response = await fetch(`${baseUrl}${path}`, { ...init, credentials: "include", headers: { "Content-Type": "application/json", ...init?.headers } });
   if (!response.ok) throw new Error(`TargetLens API ${response.status}`);
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
+function normalizeUser(user: BackendUser): AuthUser {
+  return { id: user.id, email: user.email, displayName: user.display_name };
+}
+
 export const httpClient: TargetLensClient = {
+  getCurrentUser: async () => normalizeUser(await request<BackendUser>("/api/v1/auth/me")),
+  login: async (input: AuthLoginInput) => normalizeUser((await request<BackendAuthResponse>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email: input.email, password: input.password, remember: input.remember ?? false }) })).user),
+  register: async (input: AuthRegisterInput) => normalizeUser((await request<BackendAuthResponse>("/api/v1/auth/register", { method: "POST", body: JSON.stringify({ email: input.email, password: input.password, display_name: input.displayName }) })).user),
+  demoLogin: async () => normalizeUser((await request<BackendAuthResponse>("/api/v1/auth/demo", { method: "POST", body: JSON.stringify({}) })).user),
+  logout: async () => { await request<unknown>("/api/v1/auth/logout", { method: "POST", body: JSON.stringify({}) }); },
   listSessions: async () => (await request<BackendSession[]>("/api/v1/sessions")).map(normalizeSession),
   getSession: async (id) => normalizeSession(await request<BackendSession>(`/api/v1/sessions/${id}`)) as ResearchSessionDetail,
   createSession: async (input: CreateSessionInput) => normalizeSession(await request<BackendSession>("/api/v1/sessions", { method: "POST", body: JSON.stringify(input) })),

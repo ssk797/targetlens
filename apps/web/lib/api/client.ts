@@ -7,8 +7,16 @@ export interface ResearchJob { jobId: string; status: "QUEUED" | "RUNNING" | "RE
 export interface ResearchSessionDetail extends ResearchSession { question: string; targetCard?: TargetCard; score?: ScoreSnapshot; decisionMemo?: DecisionMemo }
 export interface SessionMessageRecord { id: string; sessionId: string; role: "user" | "assistant"; content: string; createdAt: string; provider?: string; isMock?: boolean; replyTo?: string | null }
 export interface SessionPatchInput { title?: string; pinned?: boolean }
+export interface AuthUser { id: string; email: string; displayName: string }
+export interface AuthLoginInput { email: string; password: string; remember?: boolean }
+export interface AuthRegisterInput { email: string; password: string; displayName: string }
 
 export interface TargetLensClient {
+  getCurrentUser(): Promise<AuthUser>;
+  login(input: AuthLoginInput): Promise<AuthUser>;
+  register(input: AuthRegisterInput): Promise<AuthUser>;
+  demoLogin(): Promise<AuthUser>;
+  logout(): Promise<void>;
   listSessions(): Promise<ResearchSession[]>;
   getSession(id: string): Promise<ResearchSessionDetail>;
   createSession(input: CreateSessionInput): Promise<ResearchSession>;

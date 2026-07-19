@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from uuid import uuid4
 
 from app.main import app
 from app.services.research.card_builder import build_target_card, infer_scope
@@ -6,6 +7,21 @@ from app.services.research.connectors import ConnectorResult, EvidenceHit, Resea
 
 
 client = TestClient(app)
+
+
+def test_local_auth_register_me_and_logout() -> None:
+    email = f"tester-{uuid4().hex[:8]}@example.com"
+    registered = client.post("/api/v1/auth/register", json={"email": email, "password": "correct-horse-battery", "display_name": "测试研究员"})
+    assert registered.status_code == 201
+    assert registered.json()["user"]["email"] == email
+
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["display_name"] == "测试研究员"
+
+    logged_out = client.post("/api/v1/auth/logout")
+    assert logged_out.status_code == 200
+    assert client.get("/api/v1/auth/me").status_code == 401
 
 
 def test_health_is_mock_mode() -> None:

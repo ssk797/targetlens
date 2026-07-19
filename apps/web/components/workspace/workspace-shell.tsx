@@ -15,6 +15,7 @@ import { TargetCard } from "@/components/workspace/target-card";
 import { DecisionMemo } from "@/components/workspace/decision-memo";
 import { ScorePanel } from "@/components/workspace/score-panel";
 import { httpClient } from "@/lib/api/http-client";
+import type { AuthUser } from "@/lib/api/client";
 
 export type ResearchStage = "RESOLVING_ENTITY" | "FETCHING_STRUCTURED_DATA" | "RETRIEVING_LITERATURE" | "BUILDING_GRAPH" | "GENERATING_CARD" | "READY";
 
@@ -141,6 +142,7 @@ export function WorkspaceShell() {
   const [officialOnly, setOfficialOnly] = useState(false);
   const [topbarMenuOpen, setTopbarMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const loadRequestRef = useRef(0);
 
@@ -235,6 +237,10 @@ export function WorkspaceShell() {
     void initializeWorkspace();
     return () => { cancelled = true; };
   }, [loadSession]);
+
+  useEffect(() => {
+    void httpClient.getCurrentUser().then(setCurrentUser).catch(() => setCurrentUser(null));
+  }, []);
 
   const startResearch = async (question: string) => {
     setIsResearching(true);
@@ -366,6 +372,10 @@ export function WorkspaceShell() {
     }
   };
 
+  const handleLogout = async () => {
+    try { await httpClient.logout(); } finally { router.replace("/login"); }
+  };
+
   const openEvidence = (id: string) => {
     const evidence = currentCard?.validation.find((item) => item.id === id);
     if (evidence) setDrawerEvidence(evidence);
@@ -384,7 +394,7 @@ export function WorkspaceShell() {
 
   return (
     <div className="app-shell">
-      <HistorySidebar sessions={sessions} activeId={activeId} collapsed={sidebarCollapsed} searchInputRef={searchInputRef} settingsOpen={settingsOpen} officialOnly={officialOnly} onSettings={() => setSettingsOpen((value) => !value)} onToggleOfficial={() => setOfficialOnly((value) => !value)} onToggle={() => setSidebarCollapsed((value) => !value)} onSelect={(id) => void loadSession(id)} onNew={handleNew} onTutorial={() => router.push("/tutorial")} onRename={handleRename} onTogglePin={handleTogglePin} onDelete={handleDelete} onExport={exportReport} />
+      <HistorySidebar sessions={sessions} activeId={activeId} collapsed={sidebarCollapsed} searchInputRef={searchInputRef} settingsOpen={settingsOpen} officialOnly={officialOnly} user={currentUser} onLogout={() => void handleLogout()} onSettings={() => setSettingsOpen((value) => !value)} onToggleOfficial={() => setOfficialOnly((value) => !value)} onToggle={() => setSidebarCollapsed((value) => !value)} onSelect={(id) => void loadSession(id)} onNew={handleNew} onTutorial={() => router.push("/tutorial")} onRename={handleRename} onTogglePin={handleTogglePin} onDelete={handleDelete} onExport={exportReport} />
       <main className="main-viewport">
         <header className="session-topbar">
           <div className="breadcrumb"><button className="mobile-menu icon-button" onClick={() => setSidebarCollapsed(false)} aria-label="打开导航"><Menu size={20} /></button><span>靶点研读</span><span className="breadcrumb-separator">/</span><strong>{currentSession?.title ?? "新建研读"}</strong></div>
