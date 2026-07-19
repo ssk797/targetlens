@@ -5,7 +5,7 @@ export interface ResearchInput { question: string; officialOnly?: boolean; force
 export interface AskInput { question: string; officialOnly?: boolean; reasoning?: boolean }
 export interface ResearchJob { jobId: string; status: "QUEUED" | "RUNNING" | "READY"; eventsUrl: string }
 export interface ResearchSessionDetail extends ResearchSession { question: string; targetCard?: TargetCard; score?: ScoreSnapshot; decisionMemo?: DecisionMemo }
-export interface SessionMessageRecord { id: string; sessionId: string; role: "user" | "assistant"; content: string; createdAt: string; provider?: string; isMock?: boolean }
+export interface SessionMessageRecord { id: string; sessionId: string; role: "user" | "assistant"; content: string; createdAt: string; provider?: string; isMock?: boolean; replyTo?: string | null }
 export interface SessionPatchInput { title?: string; pinned?: boolean }
 
 export interface TargetLensClient {

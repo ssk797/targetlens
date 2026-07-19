@@ -18,7 +18,10 @@ import { httpClient } from "@/lib/api/http-client";
 
 export type ResearchStage = "RESOLVING_ENTITY" | "FETCHING_STRUCTURED_DATA" | "RETRIEVING_LITERATURE" | "BUILDING_GRAPH" | "GENERATING_CARD" | "READY";
 
-type ConversationItem = { kind: "user"; text: string } | { kind: "answer"; answer: GroundedAnswer };
+type ConversationItem =
+  | { kind: "user"; id?: string; text: string }
+  | { kind: "answer"; answer: GroundedAnswer }
+  | { kind: "memo"; id: string; memo: DecisionMemoData };
 const progressSequence: ResearchStage[] = ["RESOLVING_ENTITY", "FETCHING_STRUCTURED_DATA", "RETRIEVING_LITERATURE", "BUILDING_GRAPH", "GENERATING_CARD", "READY"];
 const differentiationRequestPattern = /(?:生成|输出|给我|制定|做)?差异化(?:立项)?建议/;
 
@@ -32,18 +35,90 @@ function targetHint(question: string) {
   return match?.[0]?.toUpperCase() ?? "当前靶点";
 }
 
-function answerFromHistory(message: { id: string; content: string; provider?: string; isMock?: boolean; createdAt: string }): GroundedAnswer {
+function questionAllowsSection(question: string, section: string) {
+  const normalized = question.replace(/\s+/g, "");
+  const rules: Array<[RegExp, RegExp]> = [
+    [/差异化|立项|竞争策略/, /差异化|立项/],
+    [/失败|风险|失败案例|风险警示/, /失败风险|风险案例|风险警示/],
+    [/患者|分层|标志物|biomarker/i, /患者分层|患者亚群|标志物/],
+    [/药物形式|成药|小分子|抗体|ADC|双抗/i, /成药逻辑|药物形式|形式/],
+    [/临床|试验|上市|注册|进展|药物/i, /临床进展|代表药物/],
+  ];
+  const rule = rules.find(([, heading]) => heading.test(section));
+  return !rule || rule[0].test(normalized);
+}
+
+function scopeStoredAnswer(content: string, question: string) {
+  if (!question.trim()) return content;
+  const lines = content.split(/\r?\n/);
+  const kept: string[] = [];
+  let skippedLevel: number | null = null;
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,3})\s+(.+?)\s*$/);
+    if (skippedLevel !== null) {
+      if (!heading || heading[1].length > skippedLevel) continue;
+      skippedLevel = null;
+    }
+    if (heading && !questionAllowsSection(question, heading[2])) {
+      skippedLevel = heading[1].length;
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function answerFromHistory(message: { id: string; content: string; provider?: string; isMock?: boolean; createdAt: string; replyTo?: string | null }, question = ""): GroundedAnswer {
   const isLive = message.provider === "deepseek" && !message.isMock;
   return {
     id: message.id,
     status: isLive ? "SUPPORTED" : "PARTIAL",
-    summary: message.content,
+    summary: scopeStoredAnswer(message.content, question),
     claims: [],
     conflicts: isLive ? [] : ["这条回答没有附带新的逐条引文，请打开当前靶点卡来源复核。"],
     nextActions: ["回到当前靶点卡核验来源", "补充适应证和药物形式后继续追问"],
     dataCutoff: message.createdAt.slice(0, 10),
     provider: message.provider ?? (message.isMock ? "mock" : "unknown"),
+    replyTo: message.replyTo,
   };
+}
+
+function restoreConversation(messages: Array<{ id: string; role: "user" | "assistant"; content: string; provider?: string; isMock?: boolean; createdAt: string; replyTo?: string | null }>): ConversationItem[] {
+  const users = messages.filter((message) => message.role === "user");
+  const items: ConversationItem[] = users.map((message) => ({ kind: "user", id: message.id, text: message.content }));
+  const assistants = messages.filter((message) => message.role === "assistant");
+  for (const message of assistants) {
+    const related = (message.replyTo ? users.find((user) => user.id === message.replyTo) : undefined)
+      ?? users.find((user) => user.content.trim().length > 3 && message.content.includes(user.content.trim()))
+      ?? [...users].reverse().find((user) => messages.findIndex((candidate) => candidate.id === message.id) > messages.findIndex((candidate) => candidate.id === user.id));
+    const relatedIndex = related ? items.findIndex((item) => item.kind === "user" && item.id === related.id) : -1;
+    const answer = { kind: "answer" as const, answer: answerFromHistory(message, related?.content ?? "") };
+    if (!related || relatedIndex < 0) {
+      items.push(answer);
+      continue;
+    }
+    let insertAt = relatedIndex + 1;
+    while (insertAt < items.length) {
+      const candidate = items[insertAt];
+      if (candidate.kind !== "answer" || candidate.answer.replyTo !== related.id) break;
+      insertAt += 1;
+    }
+    items.splice(insertAt, 0, answer);
+  }
+  return items;
+}
+
+function sameQuestion(left: string, right: string) {
+  return left.trim().replace(/\s+/g, " ") === right.trim().replace(/\s+/g, " ");
+}
+
+function insertMemoAfterQuestion(items: ConversationItem[], question: string, memo: DecisionMemoData): ConversationItem[] {
+  const index = items.findLastIndex((item) => item.kind === "user" && sameQuestion(item.text, question));
+  const memoItem: ConversationItem = { kind: "memo", id: `memo-${memo.createdAt ?? Date.now()}`, memo };
+  if (index < 0) return [...items, memoItem];
+  const next = [...items];
+  next.splice(index + 1, 0, memoItem);
+  return next;
 }
 
 export function WorkspaceShell() {
@@ -56,9 +131,7 @@ export function WorkspaceShell() {
   const [isResearching, setIsResearching] = useState(false);
   const [loadingSession, setLoadingSession] = useState(false);
   const [drawerEvidence, setDrawerEvidence] = useState<EvidenceItem | null>(null);
-  const [memoVisible, setMemoVisible] = useState(false);
   const [currentCard, setCurrentCard] = useState<TargetCardData | null>(null);
-  const [currentMemo, setCurrentMemo] = useState<DecisionMemoData | null>(null);
   const [currentScore, setCurrentScore] = useState<ScoreSnapshot | null>(null);
   const [researchTarget, setResearchTarget] = useState("当前靶点");
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
@@ -116,9 +189,14 @@ export function WorkspaceShell() {
       setSourceMode(card.metadata.isMock ? "离线缓存" : "实时来源");
       setOfficialOnly(false);
       setHasResearch(true);
-      setConversation(messages.map((message) => message.role === "user" ? { kind: "user", text: message.content } : { kind: "answer", answer: answerFromHistory(message) }));
-      setCurrentMemo(memo);
-      setMemoVisible(Boolean(memo));
+      const historyItems = restoreConversation(messages);
+      // A memo is an answer to an explicit question. Reinsert it directly
+      // after that question when replaying a session; if there is no trigger
+      // (for example a report-generated memo), keep it out of the chat.
+      const legacyTrigger = memo?.triggerQuestion ?? [...messages].reverse().find((message) => message.role === "user" && isDifferentiationRequest(message.content))?.content;
+      const replayMemo = memo && legacyTrigger ? { ...memo, triggerQuestion: legacyTrigger } : null;
+      const restoredConversation = replayMemo ? insertMemoAfterQuestion(historyItems, replayMemo.triggerQuestion ?? "", replayMemo) : historyItems;
+      setConversation(restoredConversation);
       setCurrentScore(score);
     } catch {
       if (requestId !== loadRequestRef.current) return;
@@ -165,8 +243,6 @@ export function WorkspaceShell() {
     setComposerSeed("");
     setConversation([{ kind: "user", text: question }]);
     setCurrentCard(null);
-    setCurrentMemo(null);
-    setMemoVisible(false);
     setCurrentScore(null);
     try {
       const session = await httpClient.createSession({ question });
@@ -189,6 +265,7 @@ export function WorkspaceShell() {
   };
 
   const handleAsk = async (question: string) => {
+    if (isAsking || isResearching) return;
     if (!activeId) return startResearch(question);
     if (currentCard && isDifferentiationRequest(question)) {
       await generateMemo(question);
@@ -232,8 +309,6 @@ export function WorkspaceShell() {
     setConversation([]);
     setCurrentCard(null);
     setResearchTarget("当前靶点");
-    setCurrentMemo(null);
-    setMemoVisible(false);
     setIsResearching(false);
     setIsAsking(false);
     setComposerSeed("");
@@ -281,8 +356,9 @@ export function WorkspaceShell() {
     setIsAsking(true);
     try {
       const memo = await httpClient.generateDecisionMemo(activeId, triggerQuestion);
-      setCurrentMemo(memo);
-      setMemoVisible(true);
+      if (triggerQuestion) {
+        setConversation((current) => insertMemoAfterQuestion(current, triggerQuestion, memo));
+      }
     } catch {
       setConversation((existing) => [...existing, { kind: "answer", answer: { id: `memo-error-${Date.now()}`, status: "REVIEW_REQUIRED", summary: "当前立项建议生成失败，已保留靶点卡和会话上下文；请稍后重试。", claims: [], conflicts: ["Decision Memo 服务暂时不可用。"], nextActions: ["稍后重试生成建议", "先从证据抽屉核验来源"], dataCutoff: currentCard.metadata.dataCutoff, provider: "system" } }]);
     } finally {
@@ -300,6 +376,12 @@ export function WorkspaceShell() {
     setComposerSeed(`请基于当前 ${currentCard.target.symbol} 靶点卡，引用相关证据并说明当前最关键的限制。`);
   };
 
+  const renderConversationItem = (item: ConversationItem, key: string) => {
+    if (item.kind === "user") return <UserMessage key={key} text={item.text} />;
+    if (item.kind === "answer") return <GroundedAnswerCard key={key} answer={item.answer} onEvidence={openEvidence} />;
+    return <DecisionMemo key={key} memo={item.memo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} />;
+  };
+
   return (
     <div className="app-shell">
       <HistorySidebar sessions={sessions} activeId={activeId} collapsed={sidebarCollapsed} searchInputRef={searchInputRef} settingsOpen={settingsOpen} officialOnly={officialOnly} onSettings={() => setSettingsOpen((value) => !value)} onToggleOfficial={() => setOfficialOnly((value) => !value)} onToggle={() => setSidebarCollapsed((value) => !value)} onSelect={(id) => void loadSession(id)} onNew={handleNew} onTutorial={() => router.push("/tutorial")} onRename={handleRename} onTogglePin={handleTogglePin} onDelete={handleDelete} onExport={exportReport} />
@@ -312,12 +394,11 @@ export function WorkspaceShell() {
         <div className="conversation-viewport">
           {!hasResearch ? <EmptyWorkspace onPreset={setComposerSeed} onTutorial={() => router.push("/tutorial")} /> : <div className="conversation-column">
             <div className="conversation-intro"><span className="conversation-date">当前会话</span><span className="intro-rule" /><span className="conversation-cutoff">数据截至 {currentCard?.metadata.dataCutoff ?? "检索完成后"}</span></div>
-            {conversationBeforeCard.map((item, index) => item.kind === "user" ? <UserMessage key={`user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
+            {conversationBeforeCard.map((item, index) => renderConversationItem(item, `before-${item.kind}-${index}`))}
             {(isResearching || (loadingSession && !currentCard)) ? <ResearchProgress stage={stage} target={currentCard?.target.symbol ?? researchTarget} onRetry={() => setProgressIndex(Math.max(progressIndex - 1, 0))} /> : null}
             {!isResearching && currentCard ? <TargetCard card={currentCard} onEvidence={setDrawerEvidence} onExport={exportReport} onRefresh={() => void refreshResearch()} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} /> : null}
             {!isResearching && currentScore ? <ScorePanel score={currentScore} onEvidence={openEvidence} /> : null}
-            {conversationAfterCard.map((item, index) => item.kind === "user" ? <UserMessage key={`follow-up-user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
-            {!isResearching && currentCard && memoVisible && currentMemo ? <DecisionMemo memo={currentMemo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} /> : null}
+            {conversationAfterCard.map((item, index) => renderConversationItem(item, `after-${item.kind}-${index}`))}
           </div>}
         </div>
         <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onReference={currentCard ? referenceCurrentCard : undefined} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />

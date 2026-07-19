@@ -255,7 +255,7 @@ async def _db_save_message(message: SessionMessage) -> None:
         from app.db.session import SessionFactory
 
         async with SessionFactory() as db:
-            metadata = {"provider": message.provider, "is_mock": message.is_mock}
+            metadata = {"provider": message.provider, "is_mock": message.is_mock, "reply_to": message.reply_to}
             db.add(DbSessionMessage(id=UUID(message.id), session_id=UUID(message.session_id), role=message.role, content=message.content, citations=[metadata], created_at=message.created_at))
             await db.commit()
     except Exception:
@@ -326,7 +326,7 @@ async def _db_list_messages(session_id: str) -> list[SessionMessage]:
                 if row.role not in {"user", "assistant"}:
                     continue
                 metadata = (row.citations or [{}])[0] if isinstance(row.citations, list) else {}
-                messages.append(SessionMessage(id=str(row.id), session_id=session_id, role=cast(Literal["user", "assistant"], row.role), content=row.content, created_at=row.created_at, provider=metadata.get("provider"), is_mock=bool(metadata.get("is_mock", False))))
+                messages.append(SessionMessage(id=str(row.id), session_id=session_id, role=cast(Literal["user", "assistant"], row.role), content=row.content, created_at=row.created_at, provider=metadata.get("provider"), is_mock=bool(metadata.get("is_mock", False)), reply_to=metadata.get("reply_to")))
             return messages
     except Exception:
         return []
@@ -1113,9 +1113,19 @@ async def ask(session_id: str, payload: MessageCreate) -> dict[str, object]:
             f"当前会话问题：{session.question}\n靶点卡证据摘要：{evidence_context or '尚未生成靶点卡'}\n"
             f"内部关系索引（只用于关联，不要向用户展示图谱）：{graph_context or '暂无可复用关系'}\n"
             "只把有证据支持的内容说成事实；无法确认时明确标注未知，不要编造文献、临床试验或监管结论。"
+            "本轮只回答用户最新的一条问题，必须一问一答；不要把上一轮答案重新复制，也不要把靶点卡的全部章节自动展开。"
+            "未被本轮明确问到的专题不要主动输出，尤其不要自动添加差异化立项建议、失败风险案例、患者分层或药物形式章节。"
+            "只有用户明确提出差异化、立项或竞争策略时才给差异化建议；只有用户明确提出失败、风险或失败案例时才讨论失败案例。"
+            "不要为用户列出尚未询问的问题、示例问题或下一步菜单；回答完本轮问题后直接停止。"
             "回答要直接回应本轮问题，并说明与上一轮的关系。使用中文 Markdown：结论用 **粗体**，复杂内容用小标题和项目符号；不要输出 HTML 或转义后的星号。"
         )}
     ]
+    latest_memo = DECISION_MEMOS.get(session_id) or await _db_load_memo(session_id)
+    if latest_memo and latest_memo.get("triggerQuestion"):
+        context_messages[0]["content"] += (
+            "\n最近一次用户明确请求的差异化建议仅作为隐藏上下文；除非本轮问题需要，不要复述或主动生成该建议："
+            f"{latest_memo.get('projectDefinition', '')}"
+        )
     for item in history[-12:]:
         context_messages.append({"role": item.role, "content": item.content[-4000:]})
     provider = "mock"
@@ -1141,7 +1151,7 @@ async def ask(session_id: str, payload: MessageCreate) -> dict[str, object]:
         summary = f"**当前仍在“{session.question}”这个研究范围内。**\n\n关于“{question}”，本地模型未启用；请结合靶点卡中的实时来源继续核验。"
         status_value = "PARTIAL"
 
-    assistant_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="assistant", content=summary, created_at=now_utc(), provider=provider, is_mock=is_mock)
+    assistant_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="assistant", content=summary, created_at=now_utc(), provider=provider, is_mock=is_mock, reply_to=user_message.id)
     history.append(assistant_message)
     await _db_save_message(assistant_message)
     updated_session = session.model_copy(update={"updated_at": now_utc(), "subtitle": _session_subtitle(session.question, "READY")})
@@ -1158,6 +1168,7 @@ async def ask(session_id: str, payload: MessageCreate) -> dict[str, object]:
         "provider_status": provider_status,
         "context_session_id": session_id,
         "turn_index": len(history) // 2,
+        "reply_to": assistant_message.reply_to,
     }
 
 
@@ -1183,12 +1194,13 @@ async def get_decision_memo(session_id: str) -> dict[str, Any] | None:
 @app.post("/api/v1/sessions/{session_id}/decision-memos")
 async def generate_decision_memo(session_id: str, payload: DecisionMemoRequest | None = None) -> dict[str, Any]:
     session = await get_session(session_id)
-    if payload and payload.question:
+    trigger_question = payload.question.strip() if payload and payload.question and payload.question.strip() else None
+    if trigger_question:
         history = SESSION_MESSAGES.get(session_id)
         if history is None:
             history = await _db_list_messages(session_id)
             SESSION_MESSAGES[session_id] = history
-        user_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="user", content=payload.question.strip(), created_at=now_utc(), is_mock=False)
+        user_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="user", content=trigger_question, created_at=now_utc(), is_mock=False)
         history.append(user_message)
         await _db_save_message(user_message)
         session = session.model_copy(update={"updated_at": now_utc()})
@@ -1249,6 +1261,11 @@ async def generate_decision_memo(session_id: str, payload: DecisionMemoRequest |
         risk_alerts.append("当前来源未覆盖该风险面，需补充权威记录后再下结论。")
 
     memo = {
+        # Keep the trigger alongside the memo so the UI can replay the
+        # question/answer pair at the original position instead of rendering
+        # every memo at the bottom of the conversation.
+        "triggerQuestion": trigger_question,
+        "createdAt": now_utc().isoformat(),
         "projectDefinition": f"围绕 {target} 在 {scope['disease']} 中的 {scope['modality']} 研究假设，限定当前公开来源范围。",
         "whyNow": f"当前卡片已归一化 {len(card.get('validation', []))} 条证据，适合把下一步从泛泛讨论收敛到可验证问题。",
         "hardParts": ["证据强度与适用范围需要分开阅读", "正常组织窗口和患者分层仍未锁定", *unknowns[:1]],

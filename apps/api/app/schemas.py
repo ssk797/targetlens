@@ -57,6 +57,10 @@ class SessionMessage(BaseModel):
     created_at: datetime
     provider: str | None = None
     is_mock: bool = False
+    # Assistant messages keep the user-message id they answer. This lets the
+    # client replay a conversation in question/answer order even when a
+    # provider response was persisted after a later user turn.
+    reply_to: str | None = None
 
 
 class ReportCreate(BaseModel):

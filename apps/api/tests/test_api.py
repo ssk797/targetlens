@@ -130,8 +130,21 @@ def test_decision_memo_trigger_question_is_kept_in_session_history() -> None:
     stored = client.get(f"/api/v1/sessions/{session_id}/decision-memos")
     assert stored.status_code == 200
     assert stored.json()["projectDefinition"].startswith("围绕 EGFR")
+    assert stored.json()["triggerQuestion"] == "生成差异化建议"
+    assert stored.json()["createdAt"]
     history = client.get(f"/api/v1/sessions/{session_id}/messages").json()
     assert history[-1]["content"] == "生成差异化建议"
+
+
+def test_assistant_message_keeps_question_reference() -> None:
+    session = client.post("/api/v1/sessions", json={"question": "EGFR 在肺癌中的临床进展是什么？"}).json()
+    session_id = session["id"]
+    response = client.post(f"/api/v1/sessions/{session_id}/messages", json={"question": "请只回答临床进展"})
+    assert response.status_code == 200
+    history = client.get(f"/api/v1/sessions/{session_id}/messages").json()
+    user = next(item for item in reversed(history) if item["role"] == "user" and item["content"] == "请只回答临床进展")
+    assistant = next(item for item in reversed(history) if item["role"] == "assistant")
+    assert assistant["reply_to"] == user["id"]
 
 
 def test_card_deduplicates_repeated_structured_function_annotations() -> None:

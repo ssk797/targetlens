@@ -15,6 +15,7 @@ interface BackendAnswer {
   is_mock: boolean;
   provider?: string;
   provider_status?: string;
+  reply_to?: string | null;
 }
 
 interface BackendSession {
@@ -93,8 +94,8 @@ export const httpClient: TargetLensClient = {
   getTargetCard: (sessionId: string) => request<TargetCard>(`/api/v1/sessions/${sessionId}/target-card`),
   getScores: async (sessionId: string) => normalizeScore(await request<BackendScore>(`/api/v1/sessions/${sessionId}/scores`)),
   getMessages: async (sessionId: string): Promise<SessionMessageRecord[]> => {
-    const messages = await request<Array<{ id: string; session_id: string; role: "user" | "assistant"; content: string; created_at: string; provider?: string; is_mock?: boolean }>>(`/api/v1/sessions/${sessionId}/messages`);
-    return messages.map((message) => ({ id: message.id, sessionId: message.session_id, role: message.role, content: message.content, createdAt: message.created_at, provider: message.provider, isMock: message.is_mock }));
+    const messages = await request<Array<{ id: string; session_id: string; role: "user" | "assistant"; content: string; created_at: string; provider?: string; is_mock?: boolean; reply_to?: string | null }>>(`/api/v1/sessions/${sessionId}/messages`);
+    return messages.map((message) => ({ id: message.id, sessionId: message.session_id, role: message.role, content: message.content, createdAt: message.created_at, provider: message.provider, isMock: message.is_mock, replyTo: message.reply_to }));
   },
   ask: async (sessionId: string, input: AskInput): Promise<GroundedAnswer> => {
     const answer = await request<BackendAnswer>(`/api/v1/sessions/${sessionId}/messages`, { method: "POST", body: JSON.stringify({ question: input.question, official_only: input.officialOnly ?? false, reasoning: input.reasoning ?? false }) });
@@ -107,6 +108,7 @@ export const httpClient: TargetLensClient = {
       nextActions: ["回到证据抽屉核验来源", "补充适应证和药物形式后继续追问"],
       dataCutoff: answer.data_cutoff,
       provider: answer.provider ?? (answer.is_mock ? "mock" : "unknown"),
+      replyTo: answer.reply_to,
     };
   },
   patchSession: async (sessionId: string, input: SessionPatchInput) => normalizeSession(await request<BackendSession>(`/api/v1/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify(input) })),

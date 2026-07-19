@@ -172,6 +172,8 @@ export interface GroundedAnswer {
   nextActions: string[];
   dataCutoff: string;
   provider?: string;
+  /** User-message id answered by this response; used for ordered replay. */
+  replyTo?: string | null;
 }
 
 export interface DecisionOption {
@@ -185,6 +187,9 @@ export interface DecisionOption {
 }
 
 export interface DecisionMemo {
+  /** The user question that explicitly requested this memo. */
+  triggerQuestion?: string | null;
+  createdAt?: string;
   projectDefinition: string;
   whyNow: string;
   hardParts: string[];
