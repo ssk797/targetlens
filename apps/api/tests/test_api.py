@@ -31,6 +31,21 @@ def test_health_is_mock_mode() -> None:
     assert response.json()["mode"] == "mock"
 
 
+def test_public_library_is_readable_without_auth() -> None:
+    response = client.get("/api/v1/public/library")
+    assert response.status_code == 200
+    entries = response.json()
+    assert {entry["target"]["symbol"] for entry in entries} == {"ROR1", "JAK2", "KRAS", "EGFR"}
+    assert all(entry["access_scope"] == "public" for entry in entries)
+
+    detail = client.get("/api/v1/public/library/kras-g12c")
+    assert detail.status_code == 200
+    payload = detail.json()
+    assert [section["title"] for section in payload["sections"]] == ["生物学功能", "肿瘤表达", "成药逻辑", "代表药物", "临床进展", "失败与风险"]
+    assert "question" not in payload
+    assert "owner_id" not in payload
+
+
 def test_create_and_fetch_session() -> None:
     created = client.post("/api/v1/sessions", json={"question": "EGFR 的证据成熟度如何？"})
     assert created.status_code == 201

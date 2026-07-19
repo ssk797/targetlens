@@ -2,6 +2,7 @@
 
 import { ArrowRight, DatabaseZap, Eye, EyeOff, LockKeyhole, ShieldCheck, Sparkles } from "lucide-react";
 import { FormEvent, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { httpClient } from "@/lib/api/http-client";
 
@@ -98,6 +99,7 @@ export default function LoginPage() {
         <div className="login-divider"><span>或</span></div>
         <button className="login-demo" type="button" onClick={() => void enterDemo()} disabled={busy}>进入本地演示模式</button>
         <p className="login-note">演示模式会使用后端创建的本地演示账户；正式环境可在此基础上接入企业 SSO。</p>
+        <Link href="/public-library" className="login-public-link">先查看公开证据库 <ArrowRight size={15} /></Link>
       </section>
     </main>
   );

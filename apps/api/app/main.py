@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -22,6 +23,8 @@ from app.schemas import (
     AuthUser,
     HealthResponse,
     MessageCreate,
+    PublicLibraryEntry,
+    PublicLibrarySummary,
     ReportCreate,
     ResearchJob,
     ResearchPreviewRequest,
@@ -37,6 +40,7 @@ from app.services.auth import hash_password, hash_session_token, new_session_tok
 from app.services.research.card_builder import build_target_card, demo_bundle, infer_scope
 from app.services.research.cache import cache_key, get_bundle as get_cached_bundle, put_bundle as put_cached_bundle
 from app.services.research.connectors import ResearchAggregator, ResearchBundle
+from app.services.public_library import get_public_library_entry, public_library_summaries
 from app.services.scoring.engine import calculate_score
 from app.services.scoring.schemas import (
     EvidenceDimensions,
@@ -48,6 +52,7 @@ from app.services.scoring.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+_request_user_id: ContextVar[str | None] = ContextVar("targetlens_request_user_id", default=None)
 
 app = FastAPI(title="TargetLens API", version="0.1.0", docs_url="/docs")
 configure_logging()
@@ -69,11 +74,15 @@ async def require_workspace_auth(request: Request, call_next):
     protected by the same HttpOnly cookie used by the login page.
     """
 
-    if request.method != "OPTIONS" and settings.api_mode == "database" and request.url.path.startswith("/api/v1/sessions"):
-        user = await _load_request_user(request)
-        if user is None:
+    user = await _load_request_user(request) if request.method != "OPTIONS" and settings.api_mode == "database" else None
+    token = _request_user_id.set(user.id if user else None)
+    try:
+        protected_path = request.url.path.startswith(("/api/v1/sessions", "/api/v1/evidence"))
+        if request.method != "OPTIONS" and protected_path and settings.api_mode == "database" and user is None:
             return JSONResponse({"detail": "AUTH_REQUIRED"}, status_code=status.HTTP_401_UNAUTHORIZED)
-    return await call_next(request)
+        return await call_next(request)
+    finally:
+        _request_user_id.reset(token)
 
 DATA_CUTOFF = settings.data_cutoff or date.today().isoformat()
 SESSIONS: dict[str, Session] = {}
@@ -263,6 +272,27 @@ def _session_with_defaults(session: Session) -> Session:
     )
 
 
+def _scoped_user_id(explicit_user_id: str | None = None) -> str | None:
+    """Return the current request owner, never a caller-supplied fallback."""
+
+    return explicit_user_id or _request_user_id.get()
+
+
+def _session_from_db_row(row: Any) -> Session:
+    return Session(
+        id=str(row.id),
+        title=row.title,
+        question=row.question,
+        status=cast(Literal["READY", "PROCESSING", "DRAFT"], row.status if row.status in {"READY", "PROCESSING", "DRAFT"} else "DRAFT"),
+        created_at=row.created_at,
+        data_cutoff=row.data_cutoff,
+        subtitle=_session_subtitle(row.question, row.status),
+        updated_at=row.updated_at,
+        pinned=str(row.id) == LEGACY_ROR1_SESSION_ID,
+        is_mock=row.mode == "mock",
+    )
+
+
 async def _db_list_sessions(user_id: str | None = None) -> list[Session]:
     if settings.api_mode != "database":
         return []
@@ -274,29 +304,39 @@ async def _db_list_sessions(user_id: str | None = None) -> list[Session]:
 
         async with SessionFactory() as db:
             query = select(DbResearchSession)
-            if user_id:
-                if _is_uuid(user_id):
-                    query = query.where(or_(DbResearchSession.is_demo.is_(True), DbResearchSession.owner_id == UUID(user_id)))
-                else:
-                    query = query.where(DbResearchSession.is_demo.is_(True))
+            scoped_user_id = _scoped_user_id(user_id)
+            if scoped_user_id and _is_uuid(scoped_user_id):
+                query = query.where(or_(DbResearchSession.is_demo.is_(True), DbResearchSession.owner_id == UUID(scoped_user_id)))
+            else:
+                # A missing owner is never a wildcard.  It is anonymous/public
+                # scope, which may only enumerate explicitly demo records.
+                query = query.where(DbResearchSession.is_demo.is_(True))
             rows = (await db.execute(query.order_by(DbResearchSession.updated_at.desc()))).scalars().all()
-            return [
-                Session(
-                    id=str(row.id),
-                    title=row.title,
-                    question=row.question,
-                    status=cast(Literal["READY", "PROCESSING", "DRAFT"], row.status if row.status in {"READY", "PROCESSING", "DRAFT"} else "DRAFT"),
-                    created_at=row.created_at,
-                    data_cutoff=row.data_cutoff,
-                    subtitle=_session_subtitle(row.question, row.status),
-                    updated_at=row.updated_at,
-                    pinned=str(row.id) == LEGACY_ROR1_SESSION_ID,
-                    is_mock=row.mode == "mock",
-                )
-                for row in rows
-            ]
+            return [_session_from_db_row(row) for row in rows]
     except Exception:
         return []
+
+
+async def _db_get_session(session_id: str, user_id: str | None = None) -> Session | None:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return None
+    try:
+        from sqlalchemy import or_, select
+
+        from app.db.models.core import ResearchSession as DbResearchSession
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            query = select(DbResearchSession).where(DbResearchSession.id == UUID(session_id))
+            scoped_user_id = _scoped_user_id(user_id)
+            if scoped_user_id and _is_uuid(scoped_user_id):
+                query = query.where(or_(DbResearchSession.is_demo.is_(True), DbResearchSession.owner_id == UUID(scoped_user_id)))
+            else:
+                query = query.where(DbResearchSession.is_demo.is_(True))
+            row = await db.scalar(query)
+            return _session_from_db_row(row) if row is not None else None
+    except Exception:
+        return None
 
 
 async def _db_create_session(session: Session, *, owner_id: str | None = None, is_demo: bool = False) -> None:
@@ -373,15 +413,17 @@ async def _db_update_session(session: Session) -> None:
     if settings.api_mode != "database" or not _is_uuid(session.id):
         return
     try:
-        from sqlalchemy import update
+        from sqlalchemy import or_, update
 
         from app.db.models.core import ResearchSession as DbResearchSession
         from app.db.session import SessionFactory
 
         async with SessionFactory() as db:
+            scoped_user_id = _scoped_user_id()
+            scope = or_(DbResearchSession.is_demo.is_(True), DbResearchSession.owner_id == UUID(scoped_user_id)) if scoped_user_id and _is_uuid(scoped_user_id) else DbResearchSession.is_demo.is_(True)
             await db.execute(
                 update(DbResearchSession)
-                .where(DbResearchSession.id == UUID(session.id))
+                .where(DbResearchSession.id == UUID(session.id), scope)
                 .values(status=session.status, title=session.title, question=session.question, updated_at=session.updated_at or now_utc())
             )
             await db.commit()
@@ -393,13 +435,15 @@ async def _db_delete_session(session_id: str) -> None:
     if settings.api_mode != "database" or not _is_uuid(session_id):
         return
     try:
-        from sqlalchemy import delete
+        from sqlalchemy import delete, or_
 
         from app.db.models.core import ResearchSession as DbResearchSession
         from app.db.session import SessionFactory
 
         async with SessionFactory() as db:
-            await db.execute(delete(DbResearchSession).where(DbResearchSession.id == UUID(session_id)))
+            scoped_user_id = _scoped_user_id()
+            scope = or_(DbResearchSession.is_demo.is_(True), DbResearchSession.owner_id == UUID(scoped_user_id)) if scoped_user_id and _is_uuid(scoped_user_id) else DbResearchSession.is_demo.is_(True)
+            await db.execute(delete(DbResearchSession).where(DbResearchSession.id == UUID(session_id), scope))
             await db.commit()
     except Exception:
         return
@@ -940,6 +984,21 @@ async def research_preview(payload: ResearchPreviewRequest) -> ResearchBundle:
     return await _fetch_research_bundle(target, disease, modality)
 
 
+@app.get("/api/v1/public/library", response_model=list[PublicLibrarySummary])
+async def list_public_library() -> list[PublicLibrarySummary]:
+    """List only curated public snapshots; no workspace/session data is joined."""
+
+    return public_library_summaries(updated_at=DATA_CUTOFF)
+
+
+@app.get("/api/v1/public/library/{slug}", response_model=PublicLibraryEntry)
+async def public_library_entry(slug: str) -> PublicLibraryEntry:
+    entry = get_public_library_entry(slug, updated_at=DATA_CUTOFF)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="PUBLIC_LIBRARY_ENTRY_NOT_FOUND")
+    return entry
+
+
 @app.get("/api/v1/sessions", response_model=list[Session])
 async def list_sessions(request: Request) -> list[Session]:
     await _ensure_legacy_ror1_session()
@@ -977,16 +1036,20 @@ async def create_session(payload: SessionCreate, request: Request) -> Session:
 
 @app.get("/api/v1/sessions/{session_id}", response_model=Session)
 async def get_session(session_id: str) -> Session:
+    # Database-backed requests must always re-check ownership before touching
+    # the process cache.  Otherwise a UUID fetched by one account could be
+    # served from the global cache to a different account.
+    if settings.api_mode == "database":
+        db_session = await _db_get_session(session_id)
+        if db_session is None:
+            raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
+        SESSIONS[session_id] = db_session
+        await _ensure_initial_message(db_session, is_mock=db_session.is_mock)
+        return _session_with_defaults(db_session)
     session = SESSIONS.get(session_id)
     if session is not None:
         return _session_with_defaults(session)
-    db_sessions = await _db_list_sessions()
-    session = next((item for item in db_sessions if item.id == session_id), None)
-    if session is None:
-        raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
-    SESSIONS[session_id] = session
-    await _ensure_initial_message(session, is_mock=session.is_mock)
-    return _session_with_defaults(session)
+    raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND")
 
 
 @app.patch("/api/v1/sessions/{session_id}", response_model=Session)
@@ -1052,7 +1115,7 @@ async def start_research(session_id: str, payload: ResearchStart | None = None) 
     return ResearchJob(job_id=f"job-{uuid4().hex[:8]}", status="READY" if use_live_connectors else "QUEUED", events_url=f"/api/v1/sessions/{session_id}/events")
 
 
-async def research_events(session_id: str, last_event_id: int = 0) -> AsyncIterator[str]:
+async def research_events(session_id: str, last_event_id: int = 0, user_id: str | None = None) -> AsyncIterator[str]:
     events = [
         ("research.progress", {"stage": "RESOLVING_ENTITY", "progress": 10}),
         ("research.progress", {"stage": "FETCHING_STRUCTURED_DATA", "progress": 35}),
@@ -1061,7 +1124,9 @@ async def research_events(session_id: str, last_event_id: int = 0) -> AsyncItera
         ("research.section_ready", {"section": "biology"}),
         ("research.section_ready", {"section": "risks"}),
     ]
-    session = await get_session(session_id)
+    session = await (_db_get_session(session_id, user_id) if settings.api_mode == "database" else get_session(session_id))
+    if session is None:
+        return
     bundle = RESEARCH_BUNDLES.get(session_id) or await _db_load_bundle(session_id, session.question)
     if bundle:
         events.extend(("research.partial_failure", {"source": result.connector, "retryable": True, "error": result.error or "connector degraded"}) for result in bundle.connectors if result.status == "DEGRADED")
@@ -1076,12 +1141,12 @@ async def research_events(session_id: str, last_event_id: int = 0) -> AsyncItera
 
 @app.get("/api/v1/sessions/{session_id}/events")
 async def events(session_id: str, last_event_id: str | None = Header(default=None, alias="Last-Event-ID")) -> StreamingResponse:
-    await get_session(session_id)
+    session = await get_session(session_id)
     try:
         cursor = max(int(last_event_id or "0"), 0)
     except ValueError:
         cursor = 0
-    return StreamingResponse(research_events(session_id, cursor), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(research_events(session_id, cursor, _request_user_id.get()), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/v1/sessions/{session_id}/target-card")

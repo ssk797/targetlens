@@ -128,5 +128,42 @@ class HealthResponse(BaseModel):
     database: DatabaseStatus = "not_configured"
 
 
+class PublicLibrarySource(BaseModel):
+    id: str
+    title: str
+    organization: str
+    url: str
+    license: str
+
+
+class PublicLibrarySection(BaseModel):
+    key: Literal["biology", "expression", "drugability", "drugs", "clinical", "risk"]
+    title: str
+    summary: str
+    points: list[str]
+
+
+class PublicLibraryTarget(BaseModel):
+    symbol: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+
+
+class PublicLibrarySummary(BaseModel):
+    slug: str
+    target: PublicLibraryTarget
+    headline: str
+    summary: str
+    updated_at: str
+    source_count: int = 0
+    access_scope: Literal["public"] = "public"
+
+
+class PublicLibraryEntry(PublicLibrarySummary):
+    sections: list[PublicLibrarySection]
+    sources: list[PublicLibrarySource]
+    disclaimer: str
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
