@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 interface ResearchComposerProps {
   onSubmit: (value: string) => void;
   onDecision: () => void;
+  onReference?: () => void;
   onExport: () => void;
   initialValue?: string;
   disabled?: boolean;
@@ -17,7 +18,7 @@ interface ResearchComposerProps {
 
 const quickPrompts = ["快速梳理靶点", "分析患者分层", "判断药物形式", "检查失败风险", "生成差异化建议"];
 
-export function ResearchComposer({ onSubmit, onDecision, onExport, initialValue = "", disabled = false, sourceMode = "实时来源", officialOnly = false, onToggleOfficial, placeholder = "输入靶点或研究问题…" }: ResearchComposerProps) {
+export function ResearchComposer({ onSubmit, onDecision, onReference, onExport, initialValue = "", disabled = false, sourceMode = "实时来源", officialOnly = false, onToggleOfficial, placeholder = "输入靶点或研究问题…" }: ResearchComposerProps) {
   const [value, setValue] = useState(initialValue);
   useEffect(() => setValue(initialValue), [initialValue]);
 
@@ -37,7 +38,7 @@ export function ResearchComposer({ onSubmit, onDecision, onExport, initialValue 
         <textarea value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder={placeholder} aria-label={placeholder} rows={2} disabled={disabled} />
         <div className="composer-toolbar">
           <div className="composer-tools">
-            <button className="composer-tool" aria-label="附加当前区块"><Paperclip size={15} />引用当前区块</button>
+            <button className="composer-tool" aria-label="引用当前卡片" onClick={onReference} disabled={!onReference || disabled}><Paperclip size={15} />引用当前卡片</button>
             <button className={`composer-tool ${officialOnly ? "composer-tool-active" : ""}`} aria-label="仅使用官方来源" aria-pressed={officialOnly} onClick={onToggleOfficial}><LockKeyhole size={15} />{officialOnly ? "仅官方 · 开" : "仅官方来源"}</button>
             <button className="composer-tool" aria-label="生成报告" onClick={onExport}><FileText size={15} />导出</button>
           </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowDownRight, ArrowUpRight, ChevronDown, CircleDot, ExternalLink, FlaskConical, Info, ShieldAlert } from "lucide-react";
+import { useState } from "react";
 import type { EvidenceItem, TargetCard as TargetCardData } from "@/lib/types/domain";
 import { StatusPill } from "@/components/ui/status-pill";
 
@@ -14,6 +15,7 @@ interface TargetCardProps {
 }
 
 export function TargetCard({ card, onEvidence, onExport, onRefresh, officialOnly = false, onToggleOfficial }: TargetCardProps) {
+  const [infoOpen, setInfoOpen] = useState(false);
   const evidenceById = new Map(card.validation.map((item) => [item.id, item]));
   const firstEvidence = card.validation[0];
   const lastEvidence = card.validation[card.validation.length - 1];
@@ -35,7 +37,7 @@ export function TargetCard({ card, onEvidence, onExport, onRefresh, officialOnly
             <p className="scope-line">当前范围：<strong>{card.scope.disease}</strong><span>·</span><strong>{card.scope.modality}</strong><span>·</span>{card.metadata.dataCutoff} 数据截至</p>
           </div>
         </div>
-      <div className="target-header-actions"><button className="header-action" onClick={onRefresh}><ArrowDownRight size={15} />刷新</button><button className={`header-action ${officialOnly ? "header-action-active" : ""}`} onClick={onToggleOfficial} aria-pressed={officialOnly}><ShieldAlert size={15} />{officialOnly ? "仅官方 · 开" : "仅官方"}</button><button className="header-action" onClick={onExport}><ExternalLink size={15} />导出</button><button className="icon-button" aria-label="更多操作"><Info size={16} /></button></div>
+      <div className="target-header-actions"><button className="header-action" onClick={onRefresh}><ArrowDownRight size={15} />刷新</button><button className={`header-action ${officialOnly ? "header-action-active" : ""}`} onClick={onToggleOfficial} aria-pressed={officialOnly}><ShieldAlert size={15} />{officialOnly ? "仅官方 · 开" : "仅官方"}</button><button className="header-action" onClick={onExport}><ExternalLink size={15} />导出</button><div className="card-info-wrap"><button className="icon-button" aria-label="卡片说明" aria-expanded={infoOpen} onClick={() => setInfoOpen((value) => !value)}><Info size={16} /></button>{infoOpen ? <div className="card-info-popover" role="dialog" aria-label="卡片说明"><p className="eyebrow">卡片说明</p><h4>证据整合结果</h4><p>这张卡按当前问题实时归一化靶点、来源与证据。内部知识图谱只用于关联检索，不会作为前台结论单独展示。</p><dl><div><dt>数据截至</dt><dd>{card.metadata.dataCutoff}</dd></div><div><dt>来源状态</dt><dd>{card.metadata.isMock ? "离线缓存，需复核" : "实时来源，需人工复核"}</dd></div></dl><button className="text-button" onClick={() => setInfoOpen(false)}>知道了</button></div> : null}</div></div>
       </header>
 
       <div className="metrics-strip">

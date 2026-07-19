@@ -1,7 +1,7 @@
 "use client";
 
-import { ArrowLeft, ChevronDown, Download, Menu, Search, Sparkles } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ChevronDown, Download, Menu, RefreshCw, Search, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { mockSessions, mockTargetCard } from "@/lib/mocks/data";
 import type { DecisionMemo as DecisionMemoData, EvidenceItem, GroundedAnswer, ResearchSession, ScoreSnapshot, TargetCard as TargetCardData } from "@/lib/types/domain";
@@ -59,6 +59,14 @@ export function WorkspaceShell() {
   const [composerSeed, setComposerSeed] = useState("");
   const [sourceMode, setSourceMode] = useState("实时来源");
   const [officialOnly, setOfficialOnly] = useState(false);
+  const [topbarMenuOpen, setTopbarMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const focusSessionSearch = useCallback(() => {
+    setSidebarCollapsed(false);
+    window.setTimeout(() => searchInputRef.current?.focus(), 0);
+  }, []);
 
   const currentSession = useMemo(() => sessions.find((session) => session.id === activeId), [activeId, sessions]);
   const stage = progressSequence[progressIndex];
@@ -71,6 +79,18 @@ export function WorkspaceShell() {
     const timer = window.setInterval(() => setProgressIndex((current) => Math.min(current + 1, progressSequence.length - 1)), 700);
     return () => window.clearInterval(timer);
   }, [isResearching]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") return;
+      const target = event.target as HTMLElement | null;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
+      event.preventDefault();
+      focusSessionSearch();
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [focusSessionSearch]);
 
   const loadSession = useCallback(async (id: string) => {
     setActiveId(id);
@@ -260,13 +280,18 @@ export function WorkspaceShell() {
     if (evidence) setDrawerEvidence(evidence);
   };
 
+  const referenceCurrentCard = () => {
+    if (!currentCard) return;
+    setComposerSeed(`请基于当前 ${currentCard.target.symbol} 靶点卡，引用相关证据并说明当前最关键的限制。`);
+  };
+
   return (
     <div className="app-shell">
-      <HistorySidebar sessions={sessions} activeId={activeId} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} onSelect={(id) => void loadSession(id)} onNew={handleNew} onTutorial={() => router.push("/tutorial")} onRename={handleRename} onTogglePin={handleTogglePin} onDelete={handleDelete} onExport={exportReport} />
+      <HistorySidebar sessions={sessions} activeId={activeId} collapsed={sidebarCollapsed} searchInputRef={searchInputRef} settingsOpen={settingsOpen} officialOnly={officialOnly} onSettings={() => setSettingsOpen((value) => !value)} onToggleOfficial={() => setOfficialOnly((value) => !value)} onToggle={() => setSidebarCollapsed((value) => !value)} onSelect={(id) => void loadSession(id)} onNew={handleNew} onTutorial={() => router.push("/tutorial")} onRename={handleRename} onTogglePin={handleTogglePin} onDelete={handleDelete} onExport={exportReport} />
       <main className="main-viewport">
         <header className="session-topbar">
           <div className="breadcrumb"><button className="mobile-menu icon-button" onClick={() => setSidebarCollapsed(false)} aria-label="打开导航"><Menu size={20} /></button><span>靶点研读</span><span className="breadcrumb-separator">/</span><strong>{currentSession?.title ?? "新建研读"}</strong></div>
-          <div className="topbar-actions"><span className="mock-mode-label"><span className="live-dot" />{sourceMode}</span><button className="topbar-button"><Search size={15} />搜索</button><button className="topbar-button" onClick={exportReport}><Download size={15} />导出</button><button className="icon-button" aria-label="更多会话操作"><ChevronDown size={16} /></button></div>
+          <div className="topbar-actions"><span className="mock-mode-label"><span className="live-dot" />{sourceMode}</span><button className="topbar-button" onClick={focusSessionSearch}><Search size={15} />搜索</button><button className="topbar-button" onClick={exportReport} disabled={!currentCard}><Download size={15} />导出</button><div className="topbar-menu-wrap"><button className="icon-button" aria-label="更多会话操作" aria-expanded={topbarMenuOpen} onClick={() => setTopbarMenuOpen((value) => !value)}><ChevronDown size={16} /></button>{topbarMenuOpen ? <div className="topbar-menu" role="menu" aria-label="会话操作"><button role="menuitem" onClick={() => { setTopbarMenuOpen(false); void refreshResearch(); }} disabled={!currentCard || isResearching}><RefreshCw size={14} />刷新当前来源</button><button role="menuitem" onClick={() => { setTopbarMenuOpen(false); handleNew(); }}><Sparkles size={14} />新建靶点研读</button><button role="menuitem" onClick={() => { setTopbarMenuOpen(false); setOfficialOnly((value) => !value); }}><span className="menu-check">{officialOnly ? "✓" : "○"}</span>仅使用官方来源</button></div> : null}</div></div>
         </header>
 
         <div className="conversation-viewport">
@@ -280,7 +305,7 @@ export function WorkspaceShell() {
             {!isResearching && currentCard && memoVisible && currentMemo ? <DecisionMemo memo={currentMemo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} /> : null}
           </div>}
         </div>
-        <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => void generateMemo()} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />
+        <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => void generateMemo()} onReference={currentCard ? referenceCurrentCard : undefined} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />
       </main>
       <EvidenceDrawer evidence={drawerEvidence} onClose={() => setDrawerEvidence(null)} />
     </div>
