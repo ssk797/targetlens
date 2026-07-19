@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services.research.card_builder import infer_scope
-from app.services.research.connectors import ConnectorResult, ResearchBundle
+from app.services.research.card_builder import build_target_card, infer_scope
+from app.services.research.connectors import ConnectorResult, EvidenceHit, ResearchBundle
 
 
 client = TestClient(app)
@@ -110,6 +110,22 @@ def test_score_and_memo_use_the_current_target_card() -> None:
     assert score.json()["manual_review_required"] is True
     assert memo.status_code == 200
     assert "JAK2" in memo.json()["projectDefinition"]
+    assert [item["label"] for item in memo.json()["radar"]] == ["临床需求", "靶点验证", "竞争格局", "风险可控性（近期预警反向）", "患者分层可执行性"]
+    assert len(memo.json()["riskAlerts"]) == 5
+
+
+def test_card_deduplicates_repeated_structured_function_annotations() -> None:
+    duplicate_hits = [
+        EvidenceHit(id=f"uniprot:{index}", connector="uniprot", source_type="structured_database", title="Tyrosine-protein kinase JAK2", url="https://www.uniprot.org/", summary="JAK2")
+        for index in range(3)
+    ]
+    card = build_target_card(
+        "session-dedup",
+        "JAK2 在 MPN 中的功能？",
+        ResearchBundle(target="JAK2", disease="MPN", modality="小分子", connectors=[ConnectorResult(connector="uniprot", status="READY", items=duplicate_hits)], items=duplicate_hits, graph_nodes=[], graph_relations=[]),
+        is_mock=True,
+    )
+    assert card["biology"]["functions"] == ["Tyrosine-protein kinase JAK2"]
 
 
 def test_event_cursor_skips_already_seen_events() -> None:

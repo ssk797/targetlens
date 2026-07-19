@@ -31,7 +31,7 @@ export function ResearchComposer({ onSubmit, onDecision, onExport, initialValue 
   return (
     <div className="composer-shell">
       <div className="composer-quick-row" aria-label="快捷追问">
-        {quickPrompts.map((prompt) => <button key={prompt} className="quick-chip" onClick={() => prompt.includes("建议") ? onDecision() : setValue(prompt)}>{prompt}</button>)}
+        {quickPrompts.map((prompt) => <button key={prompt} className="quick-chip" onClick={() => prompt === "生成差异化建议" ? onDecision() : setValue(prompt)}>{prompt}</button>)}
       </div>
       <div className="composer-box">
         <textarea value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder={placeholder} aria-label={placeholder} rows={2} disabled={disabled} />

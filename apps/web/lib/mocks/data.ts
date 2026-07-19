@@ -287,6 +287,14 @@ export const mockDecisionMemo: DecisionMemo = {
   nextValidation: ["确定 ROR1 阳性检测方案和跨平台一致性", "补充正常组织暴露与安全窗实验", "对 2–3 个表位 / payload 组合建立对照"],
   exitCriteria: ["无法形成稳定、可复现的患者分层", "正常组织窗口显示不可缓解风险", "候选分子在内吞和效应上不具备可解释优势"],
   boundaries: ["本建议只服务于研究优先级讨论，不替代药理、毒理、临床或监管决策。", "Mock 来源与项目状态必须在真实数据接入后重新核对。"],
+  radar: [
+    { label: "临床需求", value: 70, note: "适应证仍需聚焦" },
+    { label: "靶点验证", value: 68, note: "有线索、缺因果闭环" },
+    { label: "竞争格局", value: 48, note: "同靶点叙事较多" },
+    { label: "风险可控性（近期预警反向）", value: 42, note: "窗口是首要门槛" },
+    { label: "患者分层可执行性", value: 54, note: "检测方案待定义" },
+  ],
+  riskAlerts: ["正常组织窗口未锁定", "检测阈值需要跨平台复核", "候选分子内吞和效应仍需对照", "竞争项目状态需要实时更新", "Mock 来源必须回到真实来源复核"],
 };
 
 export const mockScore: ScoreSnapshot = {

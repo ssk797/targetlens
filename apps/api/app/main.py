@@ -1117,6 +1117,56 @@ async def generate_decision_memo(session_id: str) -> dict[str, Any]:
     target = card["target"]["symbol"]
     scope = card["scope"]
     unknowns = card["conclusions"].get("unknowns", [])
+    validation = list(card.get("validation", []))
+    drugs = list(card.get("drugs", []))
+    trials = list(card.get("trials", []))
+    risks = list(card.get("risks", []))
+    disease_is_defined = scope.get("disease") not in {None, "", "未指定适应症"}
+    evidence_count = len(validation)
+    authoritative_count = sum(item.get("source", {}).get("tier") in {"T0", "T1"} for item in validation)
+    degraded = "降级" in str(card.get("metrics", {}).get("riskStatus", "")) or bool(card.get("metadata", {}).get("isMock"))
+
+    def bounded(value: float) -> int:
+        return max(0, min(100, round(value)))
+
+    radar = [
+        {
+            "label": "临床需求",
+            "value": bounded(72 if disease_is_defined else 46),
+            "note": "适应证已明确，仍需用未满足需求和现行标准治疗做定量对照。" if disease_is_defined else "尚未锁定适应证，先补充疾病场景和未满足需求。",
+        },
+        {
+            "label": "靶点验证",
+            "value": bounded(38 + min(evidence_count, 18) * 2.6 + min(authoritative_count, 8) * 2),
+            "note": f"基于 {evidence_count} 条归一化证据（其中 {authoritative_count} 条来自 T1/T0 来源），不等于因果验证。",
+        },
+        {
+            "label": "竞争格局",
+            "value": bounded(84 - len(drugs) * 8 - len(trials) * 4),
+            "note": f"当前返回 {len(drugs)} 条化合物线索、{len(trials)} 条临床登记；分数越高表示可探索空白越大。",
+        },
+        {
+            "label": "风险可控性（近期预警反向）",
+            "value": bounded(82 - len(risks) * 15 - (18 if degraded else 0)),
+            "note": "分数越高表示当前检索暴露的风险压力越低；仍需持续追踪失败、监管和安全性信号。",
+        },
+        {
+            "label": "患者分层可执行性",
+            "value": bounded(35 + (22 if disease_is_defined else 0) + min(len(trials), 6) * 5),
+            "note": "以适应证清晰度、临床登记和可落地检测路径估计，最终需回到患者样本验证。",
+        },
+    ]
+
+    risk_alerts: list[str] = []
+    risk_alerts.extend(f"{risk.get('severity', 'R3')} · {risk.get('title', '关键证据边界')}：{risk.get('fact', '需要人工复核')}" for risk in risks)
+    risk_alerts.extend(str(item) for item in card.get("expression", {}).get("normalTissue", [])[:2])
+    risk_alerts.extend(str(item) for item in card.get("expression", {}).get("population", [])[:2])
+    risk_alerts.extend(str(item) for item in unknowns[:2])
+    risk_alerts.extend(str(item) for item in card.get("competition", {}).get("signals", [])[:2])
+    risk_alerts = risk_alerts[:5]
+    while len(risk_alerts) < 5:
+        risk_alerts.append("当前来源未覆盖该风险面，需补充权威记录后再下结论。")
+
     memo = {
         "projectDefinition": f"围绕 {target} 在 {scope['disease']} 中的 {scope['modality']} 研究假设，限定当前公开来源范围。",
         "whyNow": f"当前卡片已归一化 {len(card.get('validation', []))} 条证据，适合把下一步从泛泛讨论收敛到可验证问题。",
@@ -1128,6 +1178,8 @@ async def generate_decision_memo(session_id: str) -> dict[str, Any]:
         "nextValidation": ["复核原始文献和结构化条目", "补充正常组织与患者分层证据", "定义可退出的药效/安全门槛"],
         "exitCriteria": ["关键证据无法重复", "安全窗口无法形成可测量阈值", "适应证和形式始终无法收敛"],
         "boundaries": card["conclusions"].get("boundaries", []),
+        "radar": radar,
+        "riskAlerts": risk_alerts,
     }
     return memo
 

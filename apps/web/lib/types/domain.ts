@@ -191,6 +191,8 @@ export interface DecisionMemo {
   nextValidation: string[];
   exitCriteria: string[];
   boundaries: string[];
+  radar: ScoreDimension[];
+  riskAlerts: string[];
 }
 
 export interface ScoreDimension {

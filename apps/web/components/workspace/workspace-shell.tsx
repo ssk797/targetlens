@@ -20,6 +20,11 @@ export type ResearchStage = "RESOLVING_ENTITY" | "FETCHING_STRUCTURED_DATA" | "R
 
 type ConversationItem = { kind: "user"; text: string } | { kind: "answer"; answer: GroundedAnswer };
 const progressSequence: ResearchStage[] = ["RESOLVING_ENTITY", "FETCHING_STRUCTURED_DATA", "RETRIEVING_LITERATURE", "BUILDING_GRAPH", "GENERATING_CARD", "READY"];
+const differentiationRequestPattern = /(?:生成|输出|给我|制定|做)?差异化(?:立项)?建议/;
+
+function isDifferentiationRequest(question: string) {
+  return differentiationRequestPattern.test(question.replace(/\s+/g, ""));
+}
 
 function answerFromHistory(message: { id: string; content: string; provider?: string; isMock?: boolean; createdAt: string }): GroundedAnswer {
   const isLive = message.provider === "deepseek" && !message.isMock;
@@ -152,6 +157,10 @@ export function WorkspaceShell() {
 
   const handleAsk = async (question: string) => {
     if (!activeId) return startResearch(question);
+    if (currentCard && isDifferentiationRequest(question)) {
+      await generateMemo(question);
+      return;
+    }
     setConversation((current) => [...current, { kind: "user", text: question }]);
     setIsAsking(true);
     try {
@@ -231,14 +240,18 @@ export function WorkspaceShell() {
     downloadTextFile(`targetlens-${currentCard.target.symbol.toLowerCase()}-research-report.md`, content);
   };
 
-  const generateMemo = async () => {
-    if (!activeId || !currentCard || memoVisible) return;
+  const generateMemo = async (triggerQuestion?: string) => {
+    if (!activeId || !currentCard) return;
+    if (triggerQuestion) setConversation((current) => [...current, { kind: "user", text: triggerQuestion }]);
+    setIsAsking(true);
     try {
       const memo = await httpClient.generateDecisionMemo(activeId);
       setCurrentMemo(memo);
       setMemoVisible(true);
     } catch {
       setConversation((existing) => [...existing, { kind: "answer", answer: { id: `memo-error-${Date.now()}`, status: "REVIEW_REQUIRED", summary: "当前立项建议生成失败，已保留靶点卡和会话上下文；请稍后重试。", claims: [], conflicts: ["Decision Memo 服务暂时不可用。"], nextActions: ["稍后重试生成建议", "先从证据抽屉核验来源"], dataCutoff: currentCard.metadata.dataCutoff, provider: "system" } }]);
+    } finally {
+      setIsAsking(false);
     }
   };
 
@@ -262,10 +275,9 @@ export function WorkspaceShell() {
             {conversationBeforeCard.map((item, index) => item.kind === "user" ? <UserMessage key={`user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
             {(isResearching || (loadingSession && !currentCard)) ? <ResearchProgress stage={stage} onRetry={() => setProgressIndex(Math.max(progressIndex - 1, 0))} /> : null}
             {!isResearching && currentCard ? <TargetCard card={currentCard} onEvidence={setDrawerEvidence} onExport={exportReport} onRefresh={() => void refreshResearch()} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} /> : null}
-            {!isResearching && currentCard && memoVisible && currentMemo ? <DecisionMemo memo={currentMemo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} /> : null}
             {!isResearching && currentScore ? <ScorePanel score={currentScore} onEvidence={openEvidence} /> : null}
-            {!isResearching && currentCard && !memoVisible ? <button className="generate-memo-banner" onClick={() => void generateMemo()}><span><Sparkles size={17} /><strong>生成立项建议</strong><small>基于当前证据、风险和竞争信号形成可验证的下一步</small></span><ArrowLeft size={17} className="turn-right" /></button> : null}
             {conversationAfterCard.map((item, index) => item.kind === "user" ? <UserMessage key={`follow-up-user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
+            {!isResearching && currentCard && memoVisible && currentMemo ? <DecisionMemo memo={currentMemo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} /> : null}
           </div>}
         </div>
         <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => void generateMemo()} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />

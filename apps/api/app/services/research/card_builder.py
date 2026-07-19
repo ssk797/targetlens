@@ -126,6 +126,29 @@ def _safe_text(value: Any, fallback: str) -> str:
     return text or fallback
 
 
+def _unique_texts(items: list[str], limit: int | None = None) -> list[str]:
+    """Keep repeated connector labels from becoming repeated UI bullets.
+
+    Structured authorities can describe the same normalized entity with an
+    identical title. Those records remain available in ``validation`` for
+    traceability, while the human-facing summary should not repeat the same
+    sentence several times.
+    """
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        normalized = " ".join(str(item).split()).strip()
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized)
+        if limit is not None and len(result) >= limit:
+            break
+    return result
+
+
 def _evidence(hit: EvidenceHit, disease: str | None) -> dict[str, Any]:
     published = hit.metadata.get("pubdate") or hit.metadata.get("firstPublicationDate")
     return {
@@ -217,7 +240,7 @@ def build_target_card(
         for relation in bundle.graph_relations
     ]
     graph_nodes = [{"id": node.id, "label": node.label, "type": node.type} for node in bundle.graph_nodes]
-    source_names = ", ".join(_organization(item) for item in bundle.items[:3]) or "暂无返回来源"
+    source_names = ", ".join(_unique_texts([_organization(item) for item in bundle.items[:3]], limit=3)) or "暂无返回来源"
     connector_note = f"；降级来源：{', '.join(degraded)}" if degraded else ""
     connector_status = "DEGRADED" if degraded else ("READY" if bundle.connectors else "PENDING")
     workflow = [
@@ -246,6 +269,21 @@ def build_target_card(
             "detail": f"生成 {len(validation)} 条可追溯证据",
         },
     ]
+    mechanism = _unique_texts(
+        [
+            f"{target} → 结构化注释",
+            "公开文献与临床记录交叉核验",
+            "把适应证和药物形式作为独立边界",
+        ],
+        limit=3,
+    )
+    function_annotations = _unique_texts([item.title for item in (uniprot_hits + open_targets_hits)], limit=4)
+    if not function_annotations:
+        function_annotations = ["暂无结构化功能注释"]
+    dispute_notes = _unique_texts([f"{name} 未返回可用记录" for name in degraded], limit=3)
+    if not dispute_notes:
+        dispute_notes = ["本卡不把关联性记录解释为因果证明。"]
+
     executive_summary = (
         f"{target} 的实时检索已覆盖 {ready_connectors}/{total_connectors} 个来源，返回 {len(bundle.items)} 条记录（{source_names}）。"
         f" 这些记录支持继续做范围明确的验证，但不能单独替代药理、毒理、临床或监管判断{connector_note}。"
@@ -331,9 +369,9 @@ def build_target_card(
         "executiveSummary": executive_summary,
         "biology": {
             "summary": f"{identity_name} 的结构化注释与公开文献已按 {target} 汇总；具体机制仍需回到原始记录核验。",
-            "mechanism": [f"{target} → 结构化注释", "公开文献与临床记录交叉核验", "把适应证和药物形式作为独立边界"],
-            "functions": [item.title for item in (uniprot_hits + open_targets_hits)[:4]] or ["暂无结构化功能注释"],
-            "disputes": [f"{name} 未返回可用记录" for name in degraded] or ["本卡不把关联性记录解释为因果证明。"],
+            "mechanism": mechanism,
+            "functions": function_annotations,
+            "disputes": dispute_notes,
         },
         "expression": {
             "summary": "当前连接器未提供可直接替代表达谱分析的完整人群数据，需补充组织与患者分层证据。",
