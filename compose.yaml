@@ -63,6 +63,11 @@ services:
       S3_SECRET_KEY: targetlens_dev
       S3_BUCKET: targetlens-artifacts
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      # ClinicalTrials.gov should follow the host's direct/domestic route
+      # instead of the VPN proxy. Keep the exclusion in the container too
+      # so HTTP clients do not re-introduce the proxy when one is injected.
+      NO_PROXY: clinicaltrials.gov,.clinicaltrials.gov,localhost,127.0.0.1,postgres,redis,minio
+      no_proxy: clinicaltrials.gov,.clinicaltrials.gov,localhost,127.0.0.1,postgres,redis,minio
     ports:
       - "8000:8000"
     depends_on:
