@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.logging import configure_logging
 from app.schemas import (
     DatabaseStatus,
+    DecisionMemoRequest,
     HealthResponse,
     MessageCreate,
     ReportCreate,
@@ -84,6 +85,7 @@ if settings.api_mode != "database":
     ]
 TARGET_CARDS: dict[str, dict[str, Any]] = {}
 RESEARCH_BUNDLES: dict[str, ResearchBundle] = {}
+DECISION_MEMOS: dict[str, dict[str, Any]] = {}
 LEGACY_ROR1_SESSION_ID = "00000000-0000-0000-0000-000000000001"
 
 
@@ -368,6 +370,55 @@ async def _db_load_card(session_id: str) -> dict[str, Any] | None:
         return None
 
 
+async def _db_save_memo(session_id: str, memo: dict[str, Any]) -> dict[str, Any]:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return memo
+    try:
+        from sqlalchemy import desc, select
+
+        from app.db.models.core import DecisionMemoVersion
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            latest = (
+                await db.execute(
+                    select(DecisionMemoVersion.version)
+                    .where(DecisionMemoVersion.session_id == UUID(session_id))
+                    .order_by(desc(DecisionMemoVersion.version))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            version = int(latest or 0) + 1
+            db.add(DecisionMemoVersion(session_id=UUID(session_id), version=version, memo=memo))
+            await db.commit()
+    except Exception as exc:
+        logger.warning("decision_memo_persist_failed", extra={"session_id": session_id, "error": str(exc)[:240]})
+    return memo
+
+
+async def _db_load_memo(session_id: str) -> dict[str, Any] | None:
+    if settings.api_mode != "database" or not _is_uuid(session_id):
+        return None
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.core import DecisionMemoVersion
+        from app.db.session import SessionFactory
+
+        async with SessionFactory() as db:
+            row = (
+                await db.execute(
+                    select(DecisionMemoVersion)
+                    .where(DecisionMemoVersion.session_id == UUID(session_id))
+                    .order_by(DecisionMemoVersion.version.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            return dict(row.memo) if row and isinstance(row.memo, dict) else None
+    except Exception:
+        return None
+
+
 async def _db_save_bundle(session_id: str, bundle: ResearchBundle) -> None:
     """Persist source snapshots and relation facts for auditability.
 
@@ -392,7 +443,7 @@ async def _db_save_bundle(session_id: str, bundle: ResearchBundle) -> None:
             for item in bundle.items:
                 registry = (await db.execute(select(SourceRegistry).where(SourceRegistry.canonical_url == item.url))).scalars().first()
                 if registry is None:
-                    registry = SourceRegistry(canonical_url=item.url, title=item.title, source_type=item.source_type, authority_tier="T1" if item.connector in {"uniprot", "open_targets", "clinicaltrials", "chembl"} else "T2")
+                    registry = SourceRegistry(canonical_url=item.url, title=item.title, source_type=item.source_type, authority_tier="T1" if item.connector in {"uniprot", "open_targets", "clinicaltrials", "chembl", "company_news"} else "T2")
                     db.add(registry)
                     await db.flush()
                 payload = item.model_dump(mode="json")
@@ -400,7 +451,7 @@ async def _db_save_bundle(session_id: str, bundle: ResearchBundle) -> None:
                 snapshot = SourceSnapshot(source_id=registry.id, content_hash=content_hash, payload=payload)
                 db.add(snapshot)
                 await db.flush()
-                confidence = 0.85 if item.connector in {"uniprot", "open_targets", "clinicaltrials", "chembl"} else 0.7
+                confidence = 0.85 if item.connector in {"uniprot", "open_targets", "clinicaltrials", "chembl", "company_news"} else 0.7
                 db.add(DbEvidenceItem(session_id=UUID(session_id), source_snapshot_id=snapshot.id, evidence_type=item.source_type, claim=item.title, excerpt=item.summary, confidence=confidence, locator=item.metadata))
             for relation in bundle.graph_relations:
                 db.add(RelationFact(session_id=UUID(session_id), subject=relation.source, predicate=relation.predicate, object=relation.target, evidence_ids=relation.evidence_ids))
@@ -585,7 +636,7 @@ async def _fetch_research_bundle(
 
     bundle = await ResearchAggregator().search(target, disease, modality)
     if official_only:
-        official_connectors = {"uniprot", "open_targets", "clinicaltrials", "chembl"}
+        official_connectors = {"uniprot", "open_targets", "clinicaltrials", "chembl", "company_news"}
         connectors = [result for result in bundle.connectors if result.connector in official_connectors]
         items = [item for result in connectors for item in result.items]
         item_ids = {item.id for item in items}
@@ -635,7 +686,11 @@ async def ai_status() -> dict[str, object]:
 async def research_preview(payload: ResearchPreviewRequest) -> ResearchBundle:
     """Fetch a normalized, traceable preview from public research connectors."""
 
-    return await _fetch_research_bundle(payload.target, payload.disease, payload.modality)
+    normalized_target, inferred_disease, inferred_modality = infer_scope(payload.target)
+    target = normalized_target if normalized_target != "未解析靶点" else payload.target.strip()
+    disease = payload.disease or inferred_disease
+    modality = payload.modality or inferred_modality
+    return await _fetch_research_bundle(target, disease, modality)
 
 
 @app.get("/api/v1/sessions", response_model=list[Session])
@@ -706,6 +761,7 @@ async def delete_session(session_id: str) -> None:
     SESSION_MESSAGES.pop(session_id, None)
     TARGET_CARDS.pop(session_id, None)
     RESEARCH_BUNDLES.pop(session_id, None)
+    DECISION_MEMOS.pop(session_id, None)
     await _db_delete_session(session_id)
 
 
@@ -785,10 +841,14 @@ async def target_card(session_id: str) -> dict[str, Any]:
     card = TARGET_CARDS.get(session_id) or await _db_load_card(session_id)
     expected_target, expected_disease, expected_modality = infer_scope(session.question)
     stored_target = str((card or {}).get("target", {}).get("symbol", ""))
+    stored_schema_version = int((card or {}).get("metadata", {}).get("schemaVersion", 1) or 1)
     # Older sessions could contain the unresolved demo card even after the
     # question had a recognizable lowercase target. Rebuild that stale card
     # from the current connectors instead of showing the placeholder forever.
-    should_rebuild_card = card is not None and expected_target != "未解析靶点" and stored_target != expected_target
+    should_rebuild_card = card is not None and (
+        (expected_target != "未解析靶点" and stored_target != expected_target)
+        or stored_schema_version < 4
+    )
     should_repair_title = expected_target != "未解析靶点" and session.title.startswith("未解析靶点")
     if should_rebuild_card or should_repair_title:
         if should_rebuild_card:
@@ -1111,8 +1171,29 @@ async def list_messages(session_id: str) -> list[SessionMessage]:
     return history
 
 
+@app.get("/api/v1/sessions/{session_id}/decision-memos")
+async def get_decision_memo(session_id: str) -> dict[str, Any] | None:
+    await get_session(session_id)
+    memo = DECISION_MEMOS.get(session_id) or await _db_load_memo(session_id)
+    if memo is not None:
+        DECISION_MEMOS[session_id] = memo
+    return memo
+
+
 @app.post("/api/v1/sessions/{session_id}/decision-memos")
-async def generate_decision_memo(session_id: str) -> dict[str, Any]:
+async def generate_decision_memo(session_id: str, payload: DecisionMemoRequest | None = None) -> dict[str, Any]:
+    session = await get_session(session_id)
+    if payload and payload.question:
+        history = SESSION_MESSAGES.get(session_id)
+        if history is None:
+            history = await _db_list_messages(session_id)
+            SESSION_MESSAGES[session_id] = history
+        user_message = SessionMessage(id=str(uuid4()), session_id=session_id, role="user", content=payload.question.strip(), created_at=now_utc(), is_mock=False)
+        history.append(user_message)
+        await _db_save_message(user_message)
+        session = session.model_copy(update={"updated_at": now_utc()})
+        SESSIONS[session_id] = session
+        await _db_update_session(session)
     card = await target_card(session_id)
     target = card["target"]["symbol"]
     scope = card["scope"]
@@ -1181,7 +1262,8 @@ async def generate_decision_memo(session_id: str) -> dict[str, Any]:
         "radar": radar,
         "riskAlerts": risk_alerts,
     }
-    return memo
+    DECISION_MEMOS[session_id] = memo
+    return await _db_save_memo(session_id, memo)
 
 
 @app.post("/api/v1/sessions/{session_id}/reports")

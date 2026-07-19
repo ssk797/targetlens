@@ -26,6 +26,12 @@ function isDifferentiationRequest(question: string) {
   return differentiationRequestPattern.test(question.replace(/\s+/g, ""));
 }
 
+function targetHint(question: string) {
+  if (/(?<![A-Za-z0-9])KRAS\s*G12[CDV](?![A-Za-z0-9])|(?<![A-Za-z0-9])KRASG12[CDV](?![A-Za-z0-9])|(?<![A-Za-z0-9])D[-\s]?1553(?![A-Za-z0-9])|Garsorasib|格索雷塞|安方宁/i.test(question)) return "KRAS";
+  const match = question.match(/\b[A-Za-z][A-Za-z0-9-]{1,15}\b/);
+  return match?.[0]?.toUpperCase() ?? "当前靶点";
+}
+
 function answerFromHistory(message: { id: string; content: string; provider?: string; isMock?: boolean; createdAt: string }): GroundedAnswer {
   const isLive = message.provider === "deepseek" && !message.isMock;
   return {
@@ -54,6 +60,7 @@ export function WorkspaceShell() {
   const [currentCard, setCurrentCard] = useState<TargetCardData | null>(null);
   const [currentMemo, setCurrentMemo] = useState<DecisionMemoData | null>(null);
   const [currentScore, setCurrentScore] = useState<ScoreSnapshot | null>(null);
+  const [researchTarget, setResearchTarget] = useState("当前靶点");
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [isAsking, setIsAsking] = useState(false);
   const [composerSeed, setComposerSeed] = useState("");
@@ -62,6 +69,7 @@ export function WorkspaceShell() {
   const [topbarMenuOpen, setTopbarMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const loadRequestRef = useRef(0);
 
   const focusSessionSearch = useCallback(() => {
     setSidebarCollapsed(false);
@@ -93,23 +101,27 @@ export function WorkspaceShell() {
   }, [focusSessionSearch]);
 
   const loadSession = useCallback(async (id: string) => {
+    const requestId = ++loadRequestRef.current;
     setActiveId(id);
     window.sessionStorage.setItem("targetlens.activeSession", id);
     setLoadingSession(true);
     setDrawerEvidence(null);
     try {
-      const [detail, card, messages, score] = await Promise.all([httpClient.getSession(id), httpClient.getTargetCard(id), httpClient.getMessages(id), httpClient.getScores(id)]);
+      const [detail, card, messages, score, memo] = await Promise.all([httpClient.getSession(id), httpClient.getTargetCard(id), httpClient.getMessages(id), httpClient.getScores(id), httpClient.getDecisionMemo(id)]);
+      if (requestId !== loadRequestRef.current) return;
       const displayDetail = detail.title.startsWith("未解析靶点") && card.target.symbol !== "未解析靶点" ? { ...detail, title: `${card.target.symbol} · ${card.scope.disease || "新建研读"}` } : detail;
       setSessions((existing) => existing.some((session) => session.id === displayDetail.id) ? existing.map((session) => session.id === displayDetail.id ? { ...session, ...displayDetail } : session) : [...existing, displayDetail]);
       setCurrentCard(card);
+      setResearchTarget(card.target.symbol);
       setSourceMode(card.metadata.isMock ? "离线缓存" : "实时来源");
       setOfficialOnly(false);
       setHasResearch(true);
       setConversation(messages.map((message) => message.role === "user" ? { kind: "user", text: message.content } : { kind: "answer", answer: answerFromHistory(message) }));
-      setCurrentMemo(null);
-      setMemoVisible(false);
+      setCurrentMemo(memo);
+      setMemoVisible(Boolean(memo));
       setCurrentScore(score);
     } catch {
+      if (requestId !== loadRequestRef.current) return;
       // Keep the workspace usable when the API is temporarily unavailable, but
       // label the fallback explicitly instead of presenting it as live data.
       if (id === "session-ror1") {
@@ -124,7 +136,7 @@ export function WorkspaceShell() {
         setCurrentScore(null);
       }
     } finally {
-      setLoadingSession(false);
+      if (requestId === loadRequestRef.current) setLoadingSession(false);
     }
   }, []);
 
@@ -149,6 +161,7 @@ export function WorkspaceShell() {
   const startResearch = async (question: string) => {
     setIsResearching(true);
     setProgressIndex(0);
+    setResearchTarget(targetHint(question));
     setComposerSeed("");
     setConversation([{ kind: "user", text: question }]);
     setCurrentCard(null);
@@ -212,11 +225,13 @@ export function WorkspaceShell() {
   };
 
   const handleNew = () => {
+    loadRequestRef.current += 1;
     setActiveId(null);
     window.sessionStorage.removeItem("targetlens.activeSession");
     setHasResearch(false);
     setConversation([]);
     setCurrentCard(null);
+    setResearchTarget("当前靶点");
     setCurrentMemo(null);
     setMemoVisible(false);
     setIsResearching(false);
@@ -265,7 +280,7 @@ export function WorkspaceShell() {
     if (triggerQuestion) setConversation((current) => [...current, { kind: "user", text: triggerQuestion }]);
     setIsAsking(true);
     try {
-      const memo = await httpClient.generateDecisionMemo(activeId);
+      const memo = await httpClient.generateDecisionMemo(activeId, triggerQuestion);
       setCurrentMemo(memo);
       setMemoVisible(true);
     } catch {
@@ -298,14 +313,14 @@ export function WorkspaceShell() {
           {!hasResearch ? <EmptyWorkspace onPreset={setComposerSeed} onTutorial={() => router.push("/tutorial")} /> : <div className="conversation-column">
             <div className="conversation-intro"><span className="conversation-date">当前会话</span><span className="intro-rule" /><span className="conversation-cutoff">数据截至 {currentCard?.metadata.dataCutoff ?? "检索完成后"}</span></div>
             {conversationBeforeCard.map((item, index) => item.kind === "user" ? <UserMessage key={`user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
-            {(isResearching || (loadingSession && !currentCard)) ? <ResearchProgress stage={stage} onRetry={() => setProgressIndex(Math.max(progressIndex - 1, 0))} /> : null}
+            {(isResearching || (loadingSession && !currentCard)) ? <ResearchProgress stage={stage} target={currentCard?.target.symbol ?? researchTarget} onRetry={() => setProgressIndex(Math.max(progressIndex - 1, 0))} /> : null}
             {!isResearching && currentCard ? <TargetCard card={currentCard} onEvidence={setDrawerEvidence} onExport={exportReport} onRefresh={() => void refreshResearch()} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} /> : null}
             {!isResearching && currentScore ? <ScorePanel score={currentScore} onEvidence={openEvidence} /> : null}
             {conversationAfterCard.map((item, index) => item.kind === "user" ? <UserMessage key={`follow-up-user-${index}`} text={item.text} /> : <GroundedAnswerCard key={item.answer.id} answer={item.answer} onEvidence={openEvidence} />)}
             {!isResearching && currentCard && memoVisible && currentMemo ? <DecisionMemo memo={currentMemo} sourceMode={sourceMode === "实时来源" ? "实时规则" : sourceMode} /> : null}
           </div>}
         </div>
-        <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onDecision={() => void generateMemo()} onReference={currentCard ? referenceCurrentCard : undefined} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />
+        <ResearchComposer initialValue={composerSeed} onSubmit={hasResearch ? handleAsk : startResearch} onReference={currentCard ? referenceCurrentCard : undefined} onExport={exportReport} disabled={isResearching || isAsking} sourceMode={sourceMode} officialOnly={officialOnly} onToggleOfficial={() => setOfficialOnly((value) => !value)} placeholder={hasResearch ? "继续追问当前靶点，或补充适应证、药物形式…" : "输入靶点或研究问题，例如：JAK2 在 MPN 中是否适合开发小分子？"} />
       </main>
       <EvidenceDrawer evidence={drawerEvidence} onClose={() => setDrawerEvidence(null)} />
     </div>

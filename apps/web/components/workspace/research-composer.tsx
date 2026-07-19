@@ -5,7 +5,6 @@ import { useEffect, useState } from "react";
 
 interface ResearchComposerProps {
   onSubmit: (value: string) => void;
-  onDecision: () => void;
   onReference?: () => void;
   onExport: () => void;
   initialValue?: string;
@@ -18,7 +17,7 @@ interface ResearchComposerProps {
 
 const quickPrompts = ["快速梳理靶点", "分析患者分层", "判断药物形式", "检查失败风险", "生成差异化建议"];
 
-export function ResearchComposer({ onSubmit, onDecision, onReference, onExport, initialValue = "", disabled = false, sourceMode = "实时来源", officialOnly = false, onToggleOfficial, placeholder = "输入靶点或研究问题…" }: ResearchComposerProps) {
+export function ResearchComposer({ onSubmit, onReference, onExport, initialValue = "", disabled = false, sourceMode = "实时来源", officialOnly = false, onToggleOfficial, placeholder = "输入靶点或研究问题…" }: ResearchComposerProps) {
   const [value, setValue] = useState(initialValue);
   useEffect(() => setValue(initialValue), [initialValue]);
 
@@ -32,7 +31,7 @@ export function ResearchComposer({ onSubmit, onDecision, onReference, onExport, 
   return (
     <div className="composer-shell">
       <div className="composer-quick-row" aria-label="快捷追问">
-        {quickPrompts.map((prompt) => <button key={prompt} className="quick-chip" onClick={() => prompt === "生成差异化建议" ? onDecision() : setValue(prompt)}>{prompt}</button>)}
+        {quickPrompts.map((prompt) => <button key={prompt} className="quick-chip" onClick={() => setValue(prompt)} disabled={disabled}>{prompt}</button>)}
       </div>
       <div className="composer-box">
         <textarea value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} placeholder={placeholder} aria-label={placeholder} rows={2} disabled={disabled} />

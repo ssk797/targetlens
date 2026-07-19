@@ -34,7 +34,9 @@ def cache_key(target: str, disease: str | None, modality: str | None, official_o
         sort_keys=True,
     )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"targetlens:research:v1:{digest}"
+    # Bump when connector coverage or normalization semantics change so old
+    # bundles cannot mask newly added official-company evidence.
+    return f"targetlens:research:v3:{digest}"
 
 
 async def get_bundle(key: str) -> ResearchBundle | None:

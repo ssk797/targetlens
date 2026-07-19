@@ -128,6 +128,7 @@ export interface ResearchWorkflowStep {
 export interface CardMetadata {
   isMock: boolean;
   generatedForDemo: boolean;
+  schemaVersion?: number;
   dataCutoff: string;
   disclaimer: string;
   workflow?: ResearchWorkflowStep[];

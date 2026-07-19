@@ -19,6 +19,7 @@ export interface TargetLensClient {
   ask(sessionId: string, input: AskInput): Promise<GroundedAnswer>;
   patchSession(sessionId: string, input: SessionPatchInput): Promise<ResearchSession>;
   deleteSession(sessionId: string): Promise<void>;
-  generateDecisionMemo(sessionId: string): Promise<DecisionMemo>;
+  generateDecisionMemo(sessionId: string, question?: string): Promise<DecisionMemo>;
+  getDecisionMemo(sessionId: string): Promise<DecisionMemo | null>;
   getTutorials(): Promise<TutorialCourse[]>;
 }

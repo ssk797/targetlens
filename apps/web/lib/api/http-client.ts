@@ -1,7 +1,10 @@
 import type { AskInput, CreateSessionInput, ResearchInput, ResearchJob, ResearchSessionDetail, SessionMessageRecord, SessionPatchInput, TargetLensClient } from "@/lib/api/client";
 import type { DecisionMemo, GroundedAnswer, ResearchSession, ScoreSnapshot, TargetCard, TutorialCourse } from "@/lib/types/domain";
 
-const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+// The desktop browser may isolate `localhost` from the local API port while
+// still allowing the explicit loopback address. Normalize the development
+// default so the UI cannot silently fall back to the demo client.
+const baseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000").replace("://localhost", "://127.0.0.1");
 
 interface BackendAnswer {
   id: string;
@@ -108,6 +111,7 @@ export const httpClient: TargetLensClient = {
   },
   patchSession: async (sessionId: string, input: SessionPatchInput) => normalizeSession(await request<BackendSession>(`/api/v1/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify(input) })),
   deleteSession: async (sessionId: string) => { await request<unknown>(`/api/v1/sessions/${sessionId}`, { method: "DELETE" }); },
-  generateDecisionMemo: (sessionId: string) => request<DecisionMemo>(`/api/v1/sessions/${sessionId}/decision-memos`, { method: "POST" }),
+  generateDecisionMemo: (sessionId: string, question?: string) => request<DecisionMemo>(`/api/v1/sessions/${sessionId}/decision-memos`, { method: "POST", body: JSON.stringify(question ? { question } : {}) }),
+  getDecisionMemo: (sessionId: string) => request<DecisionMemo | null>(`/api/v1/sessions/${sessionId}/decision-memos`),
   getTutorials: () => request<TutorialCourse[]>("/api/v1/tutorials"),
 };

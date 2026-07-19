@@ -31,6 +31,13 @@ def _infer_target(normalized: str) -> str:
     the session so the user's wording remains traceable.
     """
 
+    # Drug/program names are evidence aliases, not the biological target.
+    # Resolve an explicit KRAS G12C / D-1553 question to KRAS so the card
+    # searches the target, clinical registry and partner announcements as one
+    # scope instead of treating the compound code as a gene.
+    if re.search(r"(?<![A-Za-z0-9])KRAS\s*G12[CDV](?![A-Za-z0-9])|(?<![A-Za-z0-9])KRASG12[CDV](?![A-Za-z0-9])|(?<![A-Za-z0-9])D[-\s]?1553(?![A-Za-z0-9])|Garsorasib|格索雷塞|安方宁", normalized, flags=re.IGNORECASE):
+        return "KRAS"
+
     candidates: list[tuple[int, int, str]] = []
     for index, match in enumerate(TARGET_TOKEN_PATTERN.finditer(normalized)):
         token = match.group(1)
@@ -65,10 +72,12 @@ def infer_scope(question: str) -> tuple[str, str | None, str]:
     target = _infer_target(normalized)
 
     modality = None
-    for candidate in ("ADC", "双抗", "单抗", "小分子", "PROTAC", "CAR-T", "small molecule", "small-molecule", "antibody", "bispecific"):
+    for candidate in ("ADC", "双抗", "单抗", "小分子", "抑制剂", "inhibitor", "PROTAC", "CAR-T", "small molecule", "small-molecule", "antibody", "bispecific"):
         if candidate.lower() in normalized.lower():
-            modality = {"small molecule": "小分子", "small-molecule": "小分子", "antibody": "抗体", "bispecific": "双抗"}.get(candidate, candidate)
+            modality = {"small molecule": "小分子", "small-molecule": "小分子", "antibody": "抗体", "bispecific": "双抗", "抑制剂": "小分子", "inhibitor": "小分子"}.get(candidate, candidate)
             break
+    if modality is None and re.search(r"(?<![A-Za-z0-9])D[-\s]?1553(?![A-Za-z0-9])|Garsorasib|格索雷塞|安方宁", normalized, flags=re.IGNORECASE):
+        modality = "小分子"
 
     disease: str | None = None
     patterns = (
@@ -97,6 +106,7 @@ def _tier(hit: EvidenceHit) -> str:
         "open_targets": "T1",
         "clinicaltrials": "T1",
         "chembl": "T1",
+        "company_news": "T1",
         "pubmed": "T2",
     }.get(hit.connector, "T3")
 
@@ -108,6 +118,9 @@ def _level(hit: EvidenceHit) -> str:
         "compound_database": "E2",
         "literature": "E3",
         "clinical_trial": "E4",
+        "company_news": "E3",
+        "company_announcement": "E3",
+        "regulatory_announcement": "E4",
     }.get(hit.source_type, "E3")
 
 
@@ -117,6 +130,7 @@ def _organization(hit: EvidenceHit) -> str:
         "open_targets": "Open Targets",
         "clinicaltrials": "ClinicalTrials.gov",
         "chembl": "ChEMBL",
+        "company_news": "企业公告 / 研发新闻",
         "pubmed": "PubMed / Europe PMC",
     }.get(hit.connector, hit.connector)
 
@@ -150,7 +164,10 @@ def _unique_texts(items: list[str], limit: int | None = None) -> list[str]:
 
 
 def _evidence(hit: EvidenceHit, disease: str | None) -> dict[str, Any]:
-    published = hit.metadata.get("pubdate") or hit.metadata.get("firstPublicationDate")
+    published = hit.metadata.get("pubdate") or hit.metadata.get("firstPublicationDate") or hit.metadata.get("published_at")
+    limitations = ["本条记录由公开连接器自动归一化，仍需打开原文复核。"]
+    if hit.connector == "company_news":
+        limitations = ["企业公告或新闻用于确认披露事实与开发节点，不替代 NMPA/CDE 原始监管记录或完整临床数据。"]
     return {
         "id": hit.id,
         "level": _level(hit),
@@ -159,7 +176,7 @@ def _evidence(hit: EvidenceHit, disease: str | None) -> dict[str, Any]:
         "studyType": hit.source_type,
         "disease": disease,
         "modelOrPopulation": _safe_text(hit.summary, "记录摘要未提供"),
-        "limitations": ["本条记录由公共连接器自动归一化，仍需打开原文复核。"],
+        "limitations": limitations,
         "source": {
             "id": hit.id,
             "title": _safe_text(hit.title, hit.id),
@@ -216,6 +233,7 @@ def build_target_card(
     open_targets_hits = [item for item in bundle.items if item.connector == "open_targets"]
     clinical_hits = [item for item in bundle.items if item.connector == "clinicaltrials"]
     chembl_hits = [item for item in bundle.items if item.connector == "chembl"]
+    company_news_hits = [item for item in bundle.items if item.connector == "company_news"]
     literature_hits = [item for item in bundle.items if item.connector == "pubmed"]
     identity_hit = uniprot_hits[0] if uniprot_hits else (open_targets_hits[0] if open_targets_hits else None)
     identity_name = identity_hit.title if identity_hit else target
@@ -229,6 +247,13 @@ def build_target_card(
     if clinical_hits:
         phases = clinical_hits[0].metadata.get("phase") or []
         stage = ", ".join(str(phase) for phase in phases) if phases else "已发现注册记录"
+    program_stages = [str(item.metadata.get("stage")) for item in company_news_hits if item.metadata.get("stage")]
+    if "MARKETED" in program_stages:
+        stage = "已获批上市（中国）"
+    elif "PHASE_3" in program_stages and stage == "未发现注册记录":
+        stage = "III 期（企业披露）"
+    elif "PHASE_2" in program_stages and stage == "未发现注册记录":
+        stage = "II 期（企业披露）"
 
     graph_edges = [
         {
@@ -240,7 +265,7 @@ def build_target_card(
         for relation in bundle.graph_relations
     ]
     graph_nodes = [{"id": node.id, "label": node.label, "type": node.type} for node in bundle.graph_nodes]
-    source_names = ", ".join(_unique_texts([_organization(item) for item in bundle.items[:3]], limit=3)) or "暂无返回来源"
+    source_names = ", ".join(_unique_texts([_organization(item) for item in (company_news_hits[:2] + bundle.items)], limit=4)) or "暂无返回来源"
     connector_note = f"；降级来源：{', '.join(degraded)}" if degraded else ""
     connector_status = "DEGRADED" if degraded else ("READY" if bundle.connectors else "PENDING")
     workflow = [
@@ -260,7 +285,7 @@ def build_target_card(
             "id": "literature-retrieval",
             "label": "文献与临床",
             "status": "READY" if literature_hits or clinical_hits else ("PARTIAL" if bundle.items else "PENDING"),
-            "detail": f"{len(literature_hits)} 篇文献 · {len(clinical_hits)} 条试验",
+            "detail": f"{len(literature_hits)} 篇文献 · {len(clinical_hits)} 条临床登记 · {len(company_news_hits)} 条企业披露",
         },
         {
             "id": "evidence-integration",
@@ -277,16 +302,27 @@ def build_target_card(
         ],
         limit=3,
     )
-    function_annotations = _unique_texts([item.title for item in (uniprot_hits + open_targets_hits)], limit=4)
+    function_annotations = _unique_texts(
+        [item.title for item in uniprot_hits]
+        + [item.title for item in open_targets_hits if item.metadata.get("entity") in {None, "target"}],
+        limit=4,
+    )
     if not function_annotations:
         function_annotations = ["暂无结构化功能注释"]
     dispute_notes = _unique_texts([f"{name} 未返回可用记录" for name in degraded], limit=3)
     if not dispute_notes:
         dispute_notes = ["本卡不把关联性记录解释为因果证明。"]
 
+    company_summary = ""
+    if company_news_hits:
+        marketed_programs = [item.metadata.get("drug_name") for item in company_news_hits if item.metadata.get("stage") == "MARKETED" and item.metadata.get("drug_name")]
+        if marketed_programs:
+            company_summary = f" 企业公告已确认 {', '.join(_unique_texts([str(item) for item in marketed_programs], limit=2))} 已有上市披露；临床登记数量仍单独按 ClinicalTrials.gov 返回值计算。"
+        else:
+            company_summary = f" 企业/研发新闻返回 {len(company_news_hits)} 条，已纳入开发节点核验。"
     executive_summary = (
         f"{target} 的实时检索已覆盖 {ready_connectors}/{total_connectors} 个来源，返回 {len(bundle.items)} 条记录（{source_names}）。"
-        f" 这些记录支持继续做范围明确的验证，但不能单独替代药理、毒理、临床或监管判断{connector_note}。"
+        f"{company_summary} 这些记录支持继续做范围明确的验证，但不能单独替代药理、毒理、临床或监管判断{connector_note}。"
     )
 
     modality_options = [modality]
@@ -315,7 +351,41 @@ def build_target_card(
         }
         for item in clinical_hits[:8]
     ]
-    drugs = [
+    company_drug_by_key: dict[str, dict[str, Any]] = {}
+    company_stage_rank = {"MARKETED": 4, "PHASE_3": 3, "PHASE_2": 2}
+    for item in company_news_hits:
+        drug_name = str(item.metadata.get("drug_name") or "").strip()
+        if not drug_name:
+            continue
+        normalized_drug = re.sub(r"[^a-z0-9]+", "", drug_name.casefold())
+        # D-1553, 格索雷塞, Garsorasib and 安方宁 are the same program.  A
+        # single card row should merge their disclosures and retain the
+        # strongest verified stage instead of whichever feed item arrived
+        # first.
+        if any(alias in normalized_drug for alias in ("d1553", "garsorasib")) or any(alias in drug_name for alias in ("格索雷塞", "安方宁")):
+            drug_key = "d1553"
+        else:
+            drug_key = normalized_drug or drug_name.casefold()
+        stage_code = str(item.metadata.get("stage") or "")
+        stage_label = {"MARKETED": "已获批上市", "PHASE_3": "III 期", "PHASE_2": "II 期"}.get(stage_code, "开发节点待复核")
+        status_label = "NMPA 批准上市" if stage_code == "MARKETED" else ("企业披露" if stage_code else "待复核")
+        existing = company_drug_by_key.get(drug_key)
+        if existing is None or company_stage_rank.get(stage_code, 0) > company_stage_rank.get(str(existing.get("stageCode") or ""), 0):
+            previous_sources = list(existing.get("sourceIds", [])) if existing else []
+            company_drug_by_key[drug_key] = {
+                "name": drug_name,
+                "sponsor": str(item.metadata.get("sponsor") or "官方企业来源"),
+                "modality": "小分子",
+                "stage": stage_label,
+                "stageCode": stage_code,
+                "status": status_label,
+                "note": item.summary,
+                "sourceIds": [item.id, *[source_id for source_id in previous_sources if source_id != item.id]],
+            }
+        elif item.id not in existing["sourceIds"]:
+            existing["sourceIds"].append(item.id)
+    company_drugs = [{key: value for key, value in drug.items() if key != "stageCode"} for drug in company_drug_by_key.values()]
+    drugs = company_drugs + [
         {
             "name": item.title,
             "sponsor": "ChEMBL 公共条目",
@@ -351,19 +421,28 @@ def build_target_card(
         if bundle.items
         else f"{target} 当前未获得足够公开证据，不能据此判定其在 {disease} 中适合开发 {modality}。"
     )
+    aliases: list[str] = []
+    if target == "KRAS":
+        mutation_match = re.search(r"KRAS\s*G12[CDV]", question, flags=re.IGNORECASE)
+        if mutation_match:
+            aliases.append(mutation_match.group(0).upper())
+        if re.search(r"D[-\s]?1553", question, flags=re.IGNORECASE):
+            aliases.append("D-1553")
+        if re.search(r"Garsorasib|格索雷塞|安方宁", question, flags=re.IGNORECASE):
+            aliases.append("Garsorasib / 格索雷塞 / 安方宁")
 
     return {
         "id": f"card-{target.lower().replace(' ', '-')}-{session_id[-8:]}-v1",
         "sessionId": session_id,
         "version": 1,
-        "target": {"symbol": target, "name": identity_name, "aliases": [], "uniprotId": accession},
+        "target": {"symbol": target, "name": identity_name, "aliases": list(dict.fromkeys(aliases)), "uniprotId": accession},
         "scope": {"disease": disease, "modality": modality, "question": question},
         "metrics": {
             "evidenceMaturity": f"{'中等' if len(bundle.items) >= 3 else '初步'} · {'E3' if literature_hits else 'E2'}",
             "highestClinicalStage": stage,
             "primaryModality": modality,
             "riskStatus": "部分来源降级 · 需复核" if degraded else ("需人工复核" if bundle.items else "证据不足"),
-            "competition": f"{len(chembl_hits)} 条化合物线索" if chembl_hits else "待补充竞争检索",
+            "competition": f"{len(drugs)} 条项目/化合物线索" if drugs else "待补充竞争检索",
             "citationCoverage": f"{coverage}% · {'实时来源' if not is_mock else '本地测试'}",
         },
         "executiveSummary": executive_summary,
@@ -374,7 +453,7 @@ def build_target_card(
             "disputes": dispute_notes,
         },
         "expression": {
-            "summary": "当前连接器未提供可直接替代表达谱分析的完整人群数据，需补充组织与患者分层证据。",
+            "summary": f"{target} 在 {disease} 中的疾病特异性表达与依赖证据仍需单独复核；当前检索结果不能替代表达谱和患者分层数据。",
             "tumorSignals": [{"label": disease, "level": "证据不足", "note": "需要疾病特异性表达与依赖性数据"}],
             "normalTissue": ["正常组织窗口未在本次检索中完成定量复核"],
             "population": ["患者亚群和检测阈值待定义"],
@@ -385,7 +464,7 @@ def build_target_card(
         "trials": trials,
         "competition": {
             "summary": "竞争判断仅基于本次公开来源命中，不能视为完整管线盘点。",
-            "signals": [f"{len(literature_hits)} 条文献记录", f"{len(clinical_hits)} 条临床登记", f"{len(chembl_hits)} 条化合物记录"],
+            "signals": [f"{len(literature_hits)} 条文献记录", f"{len(clinical_hits)} 条临床登记", f"{len(drugs)} 条项目/化合物记录", f"{len(company_news_hits)} 条企业披露"],
             "whitespace": "先补齐同靶点项目、适应证和分层标志物，再判断差异化空间。",
         },
         "risks": risks,
@@ -398,6 +477,7 @@ def build_target_card(
         "metadata": {
             "isMock": is_mock,
             "generatedForDemo": is_mock,
+            "schemaVersion": 4,
             "dataCutoff": cutoff,
             "disclaimer": "实时公共来源已归一化展示；本卡不替代药理、毒理、临床或监管判断。",
             "workflow": workflow,

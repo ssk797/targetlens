@@ -13,5 +13,6 @@ export const mockClient: TargetLensClient = {
   async patchSession(sessionId, input) { return { ...mockSessions.find((session) => session.id === sessionId) ?? mockSessions[0], ...(input.title ? { title: input.title } : {}), ...(input.pinned !== undefined ? { pinned: input.pinned } : {}) }; },
   async deleteSession() {},
   async generateDecisionMemo() { return mockDecisionMemo; },
+  async getDecisionMemo() { return mockDecisionMemo; },
   async getTutorials() { return [mockTutorial]; },
 };

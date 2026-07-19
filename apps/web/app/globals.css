@@ -190,3 +190,31 @@ kbd { margin-left: auto; border: 1px solid rgba(220, 232, 247, 0.18); border-rad
 @media (max-width: 520px) {
   .login-card { padding: 25px 20px; }.login-brief-copy h1 { font-size: 32px; }.login-signal-list small { font-size: 11px; }
 }
+
+/* Target-card readability pass: evidence is the product, so it should not
+   compete with muted chrome or disappear into pale labels. */
+.target-card { color: #243247; }
+.target-card .target-full-name { color: #465a72; font-size: 14px; }
+.target-card .scope-line { color: #63748a; font-size: 12px; }
+.target-card .scope-question { max-width: 700px; margin-top: 7px; color: #4a5d75; font-size: 12px; line-height: 1.5; }
+.target-card .scope-question span { margin-right: 6px; color: #2f61a6; font-weight: 750; }
+.target-card .metric > span { color: #65768b; font-size: 11px; }
+.target-card .metric-value { font-size: 13px; }
+.target-card .executive-summary h3 { font-size: 17px; }
+.target-card .executive-summary p:not(.eyebrow) { color: #405269; font-size: 13px; line-height: 1.65; }
+.target-card .workflow-step strong { color: #3b516d; font-size: 12px; }
+.target-card .workflow-step small { color: #718196; font-size: 10px; }
+.target-card .section-number { border: 1px solid #8fb4dc; background: #e2efff; color: #1f5d9c; font-size: 12px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.55); }
+.target-card .section-title-wrap strong { color: #1e2f46; font-size: 15px; }
+.target-card .section-title-wrap small { color: #63758b; font-size: 12px; line-height: 1.5; }
+.target-card .section-evidence-count { color: #2f61a6; font-size: 12px; font-weight: 700; }
+.target-card .evidence-section-body { color: #3d4f66; }
+.target-card .mini-label { color: #47698f; font-size: 12px; }
+.target-card .mechanism-node strong { color: #405571; font-size: 13px; }
+.target-card .compact-list li { color: #405269; font-size: 13px; line-height: 1.6; }
+.target-card .expression-name { color: #405269; font-size: 12px; }
+.target-card .program-main strong { color: #263b55; font-size: 13px; }
+.target-card .program-main span, .target-card .program-stage, .target-card .program-status { color: #65768b; font-size: 11px; }
+.target-card .empty-inline-state { color: #5b6d83; font-size: 13px; line-height: 1.6; }
+.target-card .risk-row .risk-main strong { font-size: 13px; }
+.target-card .risk-row .risk-main small, .target-card .risk-row .risk-impact { color: #5d6f84; font-size: 12px; line-height: 1.5; }

@@ -63,6 +63,12 @@ class ReportCreate(BaseModel):
     format: Literal["markdown"] = "markdown"
 
 
+class DecisionMemoRequest(BaseModel):
+    """Optional user prompt that triggered a persisted decision memo."""
+
+    question: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
 class ResearchJob(BaseModel):
     job_id: str
     status: Literal["QUEUED", "RUNNING", "READY"]

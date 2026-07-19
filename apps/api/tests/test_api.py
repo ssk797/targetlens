@@ -36,6 +36,13 @@ def test_infer_scope_accepts_short_lowercase_target_input() -> None:
     assert target == "JAK"
 
 
+def test_infer_scope_resolves_drug_alias_to_biological_target() -> None:
+    target, disease, modality = infer_scope("正大天晴获得 KRAS G12C 靶向药物 D-1553 在中国大陆的独家许可")
+    assert target == "KRAS"
+    assert disease is None
+    assert modality == "小分子"
+
+
 def test_research_returns_accepted_job() -> None:
     response = client.post("/api/v1/sessions/session-ror1/research")
     assert response.status_code == 202
@@ -114,6 +121,19 @@ def test_score_and_memo_use_the_current_target_card() -> None:
     assert len(memo.json()["riskAlerts"]) == 5
 
 
+def test_decision_memo_trigger_question_is_kept_in_session_history() -> None:
+    created = client.post("/api/v1/sessions", json={"question": "EGFR 在 NSCLC 中的证据成熟度如何？"})
+    session_id = created.json()["id"]
+    assert client.post(f"/api/v1/sessions/{session_id}/research", json={"question": created.json()["question"]}).status_code == 202
+    memo = client.post(f"/api/v1/sessions/{session_id}/decision-memos", json={"question": "生成差异化建议"})
+    assert memo.status_code == 200
+    stored = client.get(f"/api/v1/sessions/{session_id}/decision-memos")
+    assert stored.status_code == 200
+    assert stored.json()["projectDefinition"].startswith("围绕 EGFR")
+    history = client.get(f"/api/v1/sessions/{session_id}/messages").json()
+    assert history[-1]["content"] == "生成差异化建议"
+
+
 def test_card_deduplicates_repeated_structured_function_annotations() -> None:
     duplicate_hits = [
         EvidenceHit(id=f"uniprot:{index}", connector="uniprot", source_type="structured_database", title="Tyrosine-protein kinase JAK2", url="https://www.uniprot.org/", summary="JAK2")
@@ -126,6 +146,57 @@ def test_card_deduplicates_repeated_structured_function_annotations() -> None:
         is_mock=True,
     )
     assert card["biology"]["functions"] == ["Tyrosine-protein kinase JAK2"]
+
+
+def test_card_uses_official_company_program_stage_without_calling_it_a_trial() -> None:
+    announcement = EvidenceHit(
+        id="company_announcement:sse:20241111:d1553",
+        connector="company_news",
+        source_type="regulatory_announcement",
+        title="格索雷塞片获 NMPA 批准上市",
+        url="https://example.com/d1553",
+        summary="官方公告确认格索雷塞（D-1553）获批上市。",
+        metadata={"published_at": "2024-11-11", "stage": "MARKETED", "drug_name": "格索雷塞（D-1553）", "sponsor": "益方生物 × 正大天晴"},
+    )
+    bundle = ResearchBundle(target="KRAS", disease=None, modality="小分子", connectors=[ConnectorResult(connector="company_news", status="READY", items=[announcement]), ConnectorResult(connector="clinicaltrials", status="DEGRADED", error="request failed")], items=[announcement], graph_nodes=[], graph_relations=[])
+    card = build_target_card("session-kras", "KRAS G12C 的 D-1553 最新状态？", bundle, is_mock=False)
+    assert card["metrics"]["highestClinicalStage"] == "已获批上市（中国）"
+    assert card["trials"] == []
+    assert card["drugs"][0]["name"] == "格索雷塞（D-1553）"
+    assert card["drugs"][0]["stage"] == "已获批上市"
+
+
+def test_card_merges_company_program_updates_and_keeps_highest_stage() -> None:
+    phase_two = EvidenceHit(
+        id="company_announcement:hkex:20230803:d1553",
+        connector="company_news",
+        source_type="company_announcement",
+        title="D-1553 独家许可",
+        url="https://example.com/license",
+        summary="许可披露时处于 II 期",
+        metadata={"stage": "PHASE_2", "drug_name": "格索雷塞（D-1553）", "sponsor": "益方生物 × 正大天晴"},
+    )
+    marketed = EvidenceHit(
+        id="company_announcement:sse:20241111:d1553",
+        connector="company_news",
+        source_type="regulatory_announcement",
+        title="格索雷塞获批上市",
+        url="https://example.com/approval",
+        summary="NMPA 批准上市",
+        metadata={"stage": "MARKETED", "drug_name": "格索雷塞（D-1553）", "sponsor": "益方生物 × 正大天晴"},
+    )
+    bundle = ResearchBundle(
+        target="KRAS",
+        disease=None,
+        modality="小分子",
+        connectors=[ConnectorResult(connector="company_news", status="READY", items=[phase_two, marketed])],
+        items=[phase_two, marketed],
+        graph_nodes=[],
+        graph_relations=[],
+    )
+    card = build_target_card("session-kras-merge", "KRAS G12C D-1553", bundle, is_mock=False)
+    assert card["drugs"][0]["stage"] == "已获批上市"
+    assert card["drugs"][0]["sourceIds"] == [marketed.id, phase_two.id]
 
 
 def test_event_cursor_skips_already_seen_events() -> None:
