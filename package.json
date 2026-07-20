@@ -1,0 +1,15 @@
+{
+  "name": "targetlens",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter @targetlens/web dev",
+    "build": "pnpm --filter @targetlens/web build",
+    "lint": "pnpm --filter @targetlens/web lint",
+    "typecheck": "pnpm --filter @targetlens/web typecheck",
+    "test": "pnpm --filter @targetlens/web test",
+    "api:dev": "python -m uvicorn app.main:app --app-dir apps/api --reload",
+    "api:test": "python -m pytest apps/api/tests -q"
+  }
+}

@@ -1,0 +1,100 @@
+name: targetlens
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: targetlens
+      POSTGRES_USER: targetlens
+      POSTGRES_PASSWORD: ${TARGETLENS_POSTGRES_PASSWORD:-targetlens_local_only}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - targetlens_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U targetlens -d targetlens"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - targetlens_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: targetlens
+      MINIO_ROOT_PASSWORD: ${TARGETLENS_MINIO_PASSWORD:-targetlens_local_only}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - targetlens_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build:
+      context: ./apps/api
+    env_file:
+      - path: ./apps/api/.env
+        required: false
+    environment:
+      TARGETLENS_ENV: development
+      TARGETLENS_API_MODE: database
+      DATABASE_URL: postgresql+asyncpg://targetlens:${TARGETLENS_POSTGRES_PASSWORD:-targetlens_local_only}@postgres:5432/targetlens
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: targetlens
+      S3_SECRET_KEY: ${TARGETLENS_MINIO_PASSWORD:-targetlens_local_only}
+      S3_BUCKET: targetlens-artifacts
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      # ClinicalTrials.gov should follow the host's direct/domestic route
+      # instead of the VPN proxy. Keep the exclusion in the container too
+      # so HTTP clients do not re-introduce the proxy when one is injected.
+      NO_PROXY: clinicaltrials.gov,.clinicaltrials.gov,localhost,127.0.0.1,postgres,redis,minio
+      no_proxy: clinicaltrials.gov,.clinicaltrials.gov,localhost,127.0.0.1,postgres,redis,minio
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+
+  worker:
+    build:
+      context: ./apps/api
+    environment:
+      TARGETLENS_ENV: development
+      TARGETLENS_API_MODE: database
+      DATABASE_URL: postgresql+asyncpg://targetlens:${TARGETLENS_POSTGRES_PASSWORD:-targetlens_local_only}@postgres:5432/targetlens
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    command: ["uv", "run", "celery", "-A", "app.worker.celery_app", "worker", "--loglevel=INFO"]
+
+volumes:
+  targetlens_postgres_data:
+  targetlens_redis_data:
+  targetlens_minio_data:

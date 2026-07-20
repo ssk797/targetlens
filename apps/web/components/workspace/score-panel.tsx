@@ -1,0 +1,12 @@
+import { AlertOctagon, ArrowRight, CheckCircle2, Info, ShieldAlert, TrendingUp } from "lucide-react";
+import type { ScoreSnapshot } from "@/lib/types/domain";
+import { StatusPill } from "@/components/ui/status-pill";
+
+export function ScorePanel({ score, onEvidence }: { score: ScoreSnapshot; onEvidence: (id: string) => void }) {
+  const recommendationLabels = { STRONG_GO: "强烈推进", GO: "推进", CONDITIONAL_GO: "条件性推进", WATCH: "持续观察", NO_GO: "不建议推进" };
+  return <section className="score-panel"><div className="score-head"><div><p className="eyebrow">Rule-based scoring · {score.ruleVersion}</p><h3>机会、风险与证据置信度</h3><p>最终分数由规则引擎计算；模型不直接写入评分结果。</p></div><StatusPill tone="amber" dot>{recommendationLabels[score.recommendation]}</StatusPill></div><div className="score-topline"><ScoreNumber label="机会基础分" value={score.baseOpportunity} icon={<TrendingUp size={17} />} tone="blue" /><ScoreNumber label="风险负担" value={score.riskBurden} icon={<ShieldAlert size={17} />} tone="amber" /><ScoreNumber label="证据置信度" value={score.evidenceConfidence} icon={<Info size={17} />} tone="green" /><div className="adjusted-score"><span>调整后方向指数</span><strong>{score.adjustedDirectionIndex}</strong><small>confidence × risk penalty</small></div></div><div className="score-detail-grid"><div className="score-dimensions">{score.dimensions.map((dimension) => <div className="score-dimension" key={dimension.label}><div><span>{dimension.label}</span><small>{dimension.note}</small></div><div className="dimension-track"><i style={{ width: `${dimension.value}%` }} /></div><strong>{dimension.value}</strong></div>)}</div><div className="red-flag-panel"><div className="red-flag-head"><span><AlertOctagon size={16} />红线</span><small>优先于总分</small></div>{score.redFlags.map((flag) => <button className="red-flag-row" key={flag.id} onClick={() => onEvidence(flag.sourceId)}><span className={`risk-severity risk-${flag.severity.toLowerCase()}`}>{flag.severity}</span><span><strong>{flag.title}</strong><small>{flag.impact}</small></span><ArrowRight size={15} /></button>)}<div className="red-flag-foot"><CheckCircle2 size={14} />是否可缓解：{score.redFlags.every((flag) => flag.mitigable) ? "可以，通过验证门槛降低不确定性" : "待人工复核"}</div></div></div></section>;
+}
+
+function ScoreNumber({ label, value, icon, tone }: { label: string; value: number; icon: React.ReactNode; tone: string }) {
+  return <div className={`score-number score-number-${tone}`}><div className="score-number-label">{icon}<span>{label}</span></div><strong>{value}</strong><span className="score-scale">/ 100</span></div>;
+}
