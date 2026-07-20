@@ -19,3 +19,12 @@ playwright-report/
 test-results/
 .playwright-cli/
 output/*.png
+
+# Local research materials are never published by a broad `git add`.
+/*.docx
+/*.pdf
+/*.xlsx
+/*.png
+~$*
+/private/
+/local-data/

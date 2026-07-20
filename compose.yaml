@@ -6,9 +6,9 @@ services:
     environment:
       POSTGRES_DB: targetlens
       POSTGRES_USER: targetlens
-      POSTGRES_PASSWORD: targetlens_dev
+      POSTGRES_PASSWORD: ${TARGETLENS_POSTGRES_PASSWORD:-targetlens_local_only}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - targetlens_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +21,7 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - targetlens_redis_data:/data
     healthcheck:
@@ -35,10 +35,10 @@ services:
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: targetlens
-      MINIO_ROOT_PASSWORD: targetlens_dev
+      MINIO_ROOT_PASSWORD: ${TARGETLENS_MINIO_PASSWORD:-targetlens_local_only}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - targetlens_minio_data:/data
     healthcheck:
@@ -56,11 +56,11 @@ services:
     environment:
       TARGETLENS_ENV: development
       TARGETLENS_API_MODE: database
-      DATABASE_URL: postgresql+asyncpg://targetlens:targetlens_dev@postgres:5432/targetlens
+      DATABASE_URL: postgresql+asyncpg://targetlens:${TARGETLENS_POSTGRES_PASSWORD:-targetlens_local_only}@postgres:5432/targetlens
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: targetlens
-      S3_SECRET_KEY: targetlens_dev
+      S3_SECRET_KEY: ${TARGETLENS_MINIO_PASSWORD:-targetlens_local_only}
       S3_BUCKET: targetlens-artifacts
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       # ClinicalTrials.gov should follow the host's direct/domestic route
@@ -69,7 +69,7 @@ services:
       NO_PROXY: clinicaltrials.gov,.clinicaltrials.gov,localhost,127.0.0.1,postgres,redis,minio
       no_proxy: clinicaltrials.gov,.clinicaltrials.gov,localhost,127.0.0.1,postgres,redis,minio
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,7 +85,7 @@ services:
     environment:
       TARGETLENS_ENV: development
       TARGETLENS_API_MODE: database
-      DATABASE_URL: postgresql+asyncpg://targetlens:targetlens_dev@postgres:5432/targetlens
+      DATABASE_URL: postgresql+asyncpg://targetlens:${TARGETLENS_POSTGRES_PASSWORD:-targetlens_local_only}@postgres:5432/targetlens
       REDIS_URL: redis://redis:6379/0
     depends_on:
       redis:

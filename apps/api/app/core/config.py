@@ -24,13 +24,13 @@ class Settings(BaseSettings):
     environment: str = Field(default="development", validation_alias="TARGETLENS_ENV")
     api_mode: str = Field(default="mock", validation_alias="TARGETLENS_API_MODE")
     database_url: str = Field(
-        default="postgresql+asyncpg://targetlens:targetlens_dev@localhost:5432/targetlens",
+        default="postgresql+asyncpg://targetlens:targetlens_local_only@localhost:5432/targetlens",
         validation_alias="DATABASE_URL",
     )
     redis_url: str = Field(default="redis://localhost:6379/0", validation_alias="REDIS_URL")
     s3_endpoint: str = Field(default="http://localhost:9000", validation_alias="S3_ENDPOINT")
     s3_access_key: str = Field(default="targetlens", validation_alias="S3_ACCESS_KEY")
-    s3_secret_key: str = Field(default="targetlens_dev", validation_alias="S3_SECRET_KEY")
+    s3_secret_key: str = Field(default="targetlens_local_only", validation_alias="S3_SECRET_KEY")
     s3_bucket: str = Field(default="targetlens-artifacts", validation_alias="S3_BUCKET")
     web_origin: str = Field(default="http://localhost:3000", validation_alias="WEB_ORIGIN")
     cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000", validation_alias="CORS_ORIGINS")
