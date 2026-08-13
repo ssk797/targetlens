@@ -29,7 +29,9 @@ def is_valid_email(value: str) -> bool:
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
-    encode = lambda data: base64.urlsafe_b64encode(data).decode("ascii")
+    def encode(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).decode("ascii")
+
     return f"{PASSWORD_SCHEME}$16384$8$1${encode(salt)}${encode(digest)}"
 
 

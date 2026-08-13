@@ -1141,7 +1141,7 @@ async def research_events(session_id: str, last_event_id: int = 0, user_id: str 
 
 @app.get("/api/v1/sessions/{session_id}/events")
 async def events(session_id: str, last_event_id: str | None = Header(default=None, alias="Last-Event-ID")) -> StreamingResponse:
-    session = await get_session(session_id)
+    await get_session(session_id)
     try:
         cursor = max(int(last_event_id or "0"), 0)
     except ValueError:

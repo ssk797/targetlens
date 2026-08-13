@@ -1,24 +1,43 @@
+# Dependencies and build output
 node_modules/
 .pnpm-store/
 .next/
 out/
-coverage/
 dist/
+coverage/
 *.egg-info/
 *.tsbuildinfo
+
+# Python environments and caches
+.venv/
 __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.venv/
+
+# Local configuration and credentials
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
+
+# Runtime and test artifacts
 *.log
+*.pid
 playwright-report/
 test-results/
 .playwright-cli/
-output/*.png
+output/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
 
 # Local research materials are never published by a broad `git add`.
 /*.docx
